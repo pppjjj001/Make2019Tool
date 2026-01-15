@@ -824,6 +824,7 @@ namespace UnityEditor
             public string[] keywordEnumKeywords;  // 新增：存储生成的关键字数组
             public bool isToggleOff;
             public bool isKeywordEnum;  // 新增
+            public bool isHidden;  // 新增：标记是否隐藏
         }
         
         // 修改 ShaderPropertyInfo 类，添加枚举关键字列表
@@ -843,7 +844,18 @@ namespace UnityEditor
             public string[] enumNames;
             public string[] keywordEnumKeywords;  // 新增：KeywordEnum的所有关键字
             public string attributeType;
+            public bool isHidden;  // 新增：标记是否隐藏
         }
+        // 在类中添加一个选项
+        private enum ToggleDisplayStyle
+        {
+            Toggle,           // 标准 Toggle（复选框在左侧）
+            ToggleLeft,       // 标签在左侧，复选框在右侧
+            Foldout,          // 折叠样式
+            Button            // 按钮样式
+        }
+        private ToggleDisplayStyle toggleStyle = ToggleDisplayStyle.Toggle;
+
 
         [MenuItem("Tools/TempByAI/Shader GUI Generator", false, 100)]
         public static void ShowWindow()
@@ -929,6 +941,29 @@ namespace UnityEditor
             groupByPrefix = EditorGUILayout.Toggle("按前缀分组", groupByPrefix);
             generateFoldouts = EditorGUILayout.Toggle("生成折叠面板", generateFoldouts);
             generateKeywords = EditorGUILayout.Toggle("生成Keyword控制", generateKeywords);
+            
+            // 在 "生成选项" 部分添加
+            EditorGUILayout.Space(5);
+            EditorGUILayout.LabelField("Toggle显示样式", EditorStyles.boldLabel);
+            toggleStyle = (ToggleDisplayStyle)EditorGUILayout.EnumPopup("样式", toggleStyle);
+
+            EditorGUI.indentLevel++;
+            switch (toggleStyle)
+            {
+                case ToggleDisplayStyle.Toggle:
+                    EditorGUILayout.HelpBox("标准复选框样式，复选框在左侧", MessageType.Info);
+                    break;
+                case ToggleDisplayStyle.ToggleLeft:
+                    EditorGUILayout.HelpBox("标签在左侧，复选框在右侧", MessageType.Info);
+                    break;
+                case ToggleDisplayStyle.Foldout:
+                    EditorGUILayout.HelpBox("折叠箭头样式", MessageType.Info);
+                    break;
+                case ToggleDisplayStyle.Button:
+                    EditorGUILayout.HelpBox("按钮切换样式", MessageType.Info);
+                    break;
+            }
+            EditorGUI.indentLevel--;
             
             EditorGUILayout.Space(5);
             EditorGUILayout.LabelField("贴图显示样式", EditorStyles.boldLabel);
@@ -1073,11 +1108,23 @@ namespace UnityEditor
                 string name = ShaderUtil.GetPropertyName(selectedShader, i);
                 string desc = ShaderUtil.GetPropertyDescription(selectedShader, i);
                 var type = ShaderUtil.GetPropertyType(selectedShader, i);
+                // 检查是否隐藏
+                bool isHidden = propertyAttributes.ContainsKey(name) && propertyAttributes[name].isHidden;
                 
                 EditorGUILayout.BeginHorizontal("box");
-                EditorGUILayout.LabelField(name, GUILayout.Width(200));
+                // 隐藏的属性显示灰色
+                if (isHidden)
+                {
+                    GUI.color = Color.gray;
+                    EditorGUILayout.LabelField("[Hidden] " + name, GUILayout.Width(200));
+                }
+                else
+                {
+                    EditorGUILayout.LabelField(name, GUILayout.Width(200));
+                }
                 EditorGUILayout.LabelField(type.ToString(), GUILayout.Width(80));
                 EditorGUILayout.LabelField(desc);
+                GUI.color = Color.white;
                 EditorGUILayout.EndHorizontal();
             }
         }
@@ -1169,6 +1216,21 @@ namespace UnityEditor
                     continue;
 
                 string propName = propNameMatch.Groups[1].Value;
+                
+                // ===== 新增：检测 [HideInInspector] =====
+                bool isHidden = Regex.IsMatch(trimmedLine, @"\[HideInInspector\]", RegexOptions.IgnoreCase);
+                if (isHidden)
+                {
+                    // 如果已经有该属性的记录，更新它；否则创建新记录
+                    if (!propertyAttributes.ContainsKey(propName))
+                    {
+                        propertyAttributes[propName] = new PropertyAttributeInfo();
+                    }
+                    propertyAttributes[propName].isHidden = true;
+                    Debug.Log($"找到 [HideInInspector] -> {propName}");
+                    // 注意：不要 continue，因为可能还有其他属性标记需要解析
+                }
+                // ===== 新增结束 =====
 
                 // [Toggle(_KEYWORD)]
                 var toggleWithKeywordMatch = Regex.Match(trimmedLine, @"\[Toggle\s*\(\s*([A-Z_][A-Z0-9_]*)\s*\)\s*\]",
@@ -1542,6 +1604,22 @@ namespace UnityEditor
 
             for (int i = 0; i < propertyCount; i++)
             {
+                string propName = ShaderUtil.GetPropertyName(selectedShader, i);
+        
+                // ===== 新增：检查是否隐藏 =====
+                bool isHidden = false;
+                if (propertyAttributes.ContainsKey(propName))
+                {
+                    isHidden = propertyAttributes[propName].isHidden;
+                }
+                // 跳过隐藏的属性
+                if (isHidden)
+                {
+                    Debug.Log($"跳过隐藏属性: {propName}");
+                    continue;
+                }
+                // ===== 新增结束 =====
+                
                 var prop = new ShaderPropertyInfo
                 {
                     name = ShaderUtil.GetPropertyName(selectedShader, i),
@@ -1968,6 +2046,10 @@ namespace UnityEditor
                     {
                         GenerateTogglePropertyGUI(sb, prop, varName, styleName, indent + "    ");
                     }
+                    else if (prop.isToggle)
+                    {
+                        GeneratePureTogglePropertyGUI(sb, prop, varName, styleName, indent + "    ");
+                    }
                     else
                     {
                         sb.AppendLine(
@@ -2009,15 +2091,102 @@ namespace UnityEditor
             }
         }
 
+        /// <summary>
+        /// 生成纯 Toggle 属性的 GUI 代码（没有关联关键字）
+        /// </summary>
+        private void GeneratePureTogglePropertyGUI(StringBuilder sb, ShaderPropertyInfo prop, string varName,
+            string styleName, string indent)
+        {
+            // 纯 Toggle，不需要调用 MaterialChanged
+            sb.AppendLine($"{indent}bool {varName}Enabled = properties.{varName}.floatValue >= 0.5f;");
+
+            switch (toggleStyle)
+            {
+                case ToggleDisplayStyle.Toggle:
+                    sb.AppendLine($"{indent}EditorGUI.BeginChangeCheck();");
+                    sb.AppendLine(
+                        $"{indent}{varName}Enabled = EditorGUILayout.Toggle(Styles.{styleName}, {varName}Enabled);");
+                    sb.AppendLine($"{indent}if (EditorGUI.EndChangeCheck())");
+                    sb.AppendLine($"{indent}{{");
+                    sb.AppendLine($"{indent}    properties.{varName}.floatValue = {varName}Enabled ? 1.0f : 0.0f;");
+                    sb.AppendLine($"{indent}}}");
+                    break;
+
+                case ToggleDisplayStyle.ToggleLeft:
+                    sb.AppendLine($"{indent}EditorGUI.BeginChangeCheck();");
+                    sb.AppendLine(
+                        $"{indent}{varName}Enabled = EditorGUILayout.ToggleLeft(Styles.{styleName}, {varName}Enabled);");
+                    sb.AppendLine($"{indent}if (EditorGUI.EndChangeCheck())");
+                    sb.AppendLine($"{indent}{{");
+                    sb.AppendLine($"{indent}    properties.{varName}.floatValue = {varName}Enabled ? 1.0f : 0.0f;");
+                    sb.AppendLine($"{indent}}}");
+                    break;
+
+                case ToggleDisplayStyle.Foldout:
+                    sb.AppendLine($"{indent}EditorGUI.BeginChangeCheck();");
+                    sb.AppendLine(
+                        $"{indent}{varName}Enabled = EditorGUILayout.Foldout({varName}Enabled, Styles.{styleName}, true);");
+                    sb.AppendLine($"{indent}if (EditorGUI.EndChangeCheck())");
+                    sb.AppendLine($"{indent}{{");
+                    sb.AppendLine($"{indent}    properties.{varName}.floatValue = {varName}Enabled ? 1.0f : 0.0f;");
+                    sb.AppendLine($"{indent}}}");
+                    break;
+
+                case ToggleDisplayStyle.Button:
+                    sb.AppendLine(
+                        $"{indent}GUIStyle {varName}BtnStyle = {varName}Enabled ? new GUIStyle(EditorStyles.miniButton) {{ fontStyle = FontStyle.Bold }} : EditorStyles.miniButton;");
+                    sb.AppendLine($"{indent}if (GUILayout.Button(Styles.{styleName}, {varName}BtnStyle))");
+                    sb.AppendLine($"{indent}{{");
+                    sb.AppendLine($"{indent}    properties.{varName}.floatValue = {varName}Enabled ? 0.0f : 1.0f;");
+                    sb.AppendLine($"{indent}}}");
+                    break;
+            }
+        }
+
+        // 修改 GenerateTogglePropertyGUI 方法
         private void GenerateTogglePropertyGUI(StringBuilder sb, ShaderPropertyInfo prop, string varName, string styleName, string indent)
         {
+            // 手动实现 Toggle，不依赖 Shader 中的 [Toggle] 属性
             sb.AppendLine($"{indent}EditorGUI.BeginChangeCheck();");
-            sb.AppendLine($"{indent}materialEditor.ShaderProperty(properties.{varName}, Styles.{styleName});");
+            sb.AppendLine($"{indent}bool {varName}Enabled = properties.{varName}.floatValue >= 0.5f;");
+    
+            switch (toggleStyle)
+            {
+                case ToggleDisplayStyle.Toggle:
+                    sb.AppendLine($"{indent}{varName}Enabled = EditorGUILayout.Toggle(Styles.{styleName}, {varName}Enabled);");
+                    break;
+            
+                case ToggleDisplayStyle.ToggleLeft:
+                    sb.AppendLine($"{indent}{varName}Enabled = EditorGUILayout.ToggleLeft(Styles.{styleName}, {varName}Enabled);");
+                    break;
+            
+                case ToggleDisplayStyle.Foldout:
+                    sb.AppendLine($"{indent}{varName}Enabled = EditorGUILayout.Foldout({varName}Enabled, Styles.{styleName}, true);");
+                    break;
+            
+                case ToggleDisplayStyle.Button:
+                    sb.AppendLine($"{indent}var {varName}Style = {varName}Enabled ? EditorStyles.toolbarButton : EditorStyles.miniButton;");
+                    sb.AppendLine($"{indent}if (GUILayout.Button(Styles.{styleName}, {varName}Style))");
+                    sb.AppendLine($"{indent}    {varName}Enabled = !{varName}Enabled;");
+                    break;
+            }
+    
             sb.AppendLine($"{indent}if (EditorGUI.EndChangeCheck())");
             sb.AppendLine($"{indent}{{");
+            sb.AppendLine($"{indent}    properties.{varName}.floatValue = {varName}Enabled ? 1.0f : 0.0f;");
             sb.AppendLine($"{indent}    MaterialChanged(material);");
             sb.AppendLine($"{indent}}}");
         }
+        //--------------因为增加手动实现Toggle属性，所以需要修改GenerateTogglePropertyGUI方法------------
+        // private void GenerateTogglePropertyGUI(StringBuilder sb, ShaderPropertyInfo prop, string varName, string styleName, string indent)
+        // {
+        //     sb.AppendLine($"{indent}EditorGUI.BeginChangeCheck();");
+        //     sb.AppendLine($"{indent}materialEditor.ShaderProperty(properties.{varName}, Styles.{styleName});");
+        //     sb.AppendLine($"{indent}if (EditorGUI.EndChangeCheck())");
+        //     sb.AppendLine($"{indent}{{");
+        //     sb.AppendLine($"{indent}    MaterialChanged(material);");
+        //     sb.AppendLine($"{indent}}}");
+        // }
 
         private Dictionary<string, List<ShaderPropertyInfo>> GetPropertyGroups(List<ShaderPropertyInfo> properties)
         {
