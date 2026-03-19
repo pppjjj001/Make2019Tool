@@ -120,23 +120,29 @@ if %ERRORLEVEL% neq 0 (
 :: ── 启动程序 ──
 cd /d "%SCRIPT_DIR%"
 %PYTHON_CMD% "%SCRIPT_PATH%"
+set "EXIT_CODE=%ERRORLEVEL%"
 
 :: ── 异常退出处理 ──
-if %ERRORLEVEL% neq 0 (
+:: 退出码 0 = 正常, 1 = 也可能是正常关闭窗口
+if %EXIT_CODE% gtr 1 (
     echo.
     echo ============================================
-    echo  [!] Program exited with error: %ERRORLEVEL%
+    echo  [!] Program exited with error: %EXIT_CODE%
     echo ============================================
     echo.
     echo Possible causes:
     echo   [1] Syntax error in the Python script
-    echo   [2] Python version too old (need 3.7+)
+    echo   [2] Python version too old ^(need 3.7+^)
     echo   [3] Missing dependencies
     echo.
     echo Try running manually:
     echo   %PYTHON_CMD% "%SCRIPT_PATH%"
     echo.
     pause
+) else (
+    echo.
+    echo [OK] Program exited normally.
+    timeout /t 2 >nul
 )
 
 endlocal
