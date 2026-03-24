@@ -1,0 +1,8 @@
+# 视频去闪烁工具 - Python 依赖
+# 基础功能仅需 Python 标准库 (tkinter)
+# 以下为可选增强依赖
+
+# 如需使用高级自定义 Python 滤波功能，取消注释：
+# opencv-python>=4.5.0
+# numpy>=1.20.0
+# scipy>=1.7.0
