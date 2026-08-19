@@ -1,0 +1,61 @@
+# -*- coding: utf-8 -*-
+# ↑ 这行不能删：pip 解析 requirements 文件时，没有 BOM 也没有 coding 声明的话
+#   会用系统默认编码去解码（中文 Windows 上是 GBK），下面的中文注释会直接把
+#   `pip install -r requirements.txt` 弄成 UnicodeDecodeError。
+#
+# VideoToolbox 依赖清单
+#
+# 安装（推荐在项目私有虚拟环境里）:
+#   python -m venv venv
+#   venv\Scripts\activate            # Windows
+#   pip install -r requirements.txt
+#
+# 说明:
+#   * 下方「必须」段落是 main.py 启动和跑基础功能所需的最小集合。
+#   * tkinter 是标准库的一部分，pip 装不了；Windows 官方安装包默认自带，
+#     Linux 上通常要额外装系统包（Debian/Ubuntu: sudo apt install python3-tk）。
+#   * FFmpeg 是外部可执行程序，不是 Python 包，需单独安装并加入 PATH，
+#     H.264/H.265 编码、保留音频、转 GIF 的最优路径都依赖它。
+#   * 已验证环境: Python 3.12 / opencv-python 4.13 / numpy 2.4 / onnxruntime-directml 1.24
+
+
+# ── 必须 ────────────────────────────────────────────────────────
+opencv-python>=4.5.0
+numpy>=1.20.0
+
+
+# ── DNN 推理（去马赛克 / 超分 / DeepMosaics 必须）────────────────
+# Windows 上优先用 DirectML 版：无需 CUDA/cuDNN，任意 DX12 显卡（含集显）都能加速。
+onnxruntime-directml>=1.15.0 ; sys_platform == "win32"
+# 非 Windows（或想用 NVIDIA CUDA）时改用下面任一行，并注释掉上面那行:
+#   onnxruntime-gpu>=1.15.0
+#   onnxruntime>=1.15.0
+onnxruntime>=1.15.0 ; sys_platform != "win32"
+
+# Real-ESRGAN 分块推理时用于改写 ONNX 的输入形状
+onnx>=1.14.0
+
+
+# ── 强烈建议 ────────────────────────────────────────────────────
+# 两个用途：
+#   1. GUI 图像预览走 PIL 会明显更快更稳；缺失时回退到临时 PPM 文件方案
+#   2. 水印和字幕的文字渲染。cv2.putText 画不出汉字，中文水印/中文字幕烧录
+#      必须靠 PIL 的 TrueType 渲染；缺失时只能画 ASCII 并在日志里警告。
+Pillow>=9.0.0
+
+# 亮度曲线分析的 Savitzky-Golay 平滑
+scipy>=1.7.0
+
+
+# ── 可选 ────────────────────────────────────────────────────────
+# 文件拖拽导入。缺失时程序照常启动，只是拖拽失效（可用「打开视频」按钮代替）。
+# 优先使用 tkinterdnd2；装不上时可改装 windnd（仅 Windows，功能等价）。
+tkinterdnd2>=0.3.0
+# windnd>=1.0.7 ; sys_platform == "win32"
+
+
+# ── 一次性工具（日常运行不需要）─────────────────────────────────
+# 仅在需要用 export_deepmosaics_onnx.py 把 DeepMosaics 的 .pth 权重
+# 重新导出为 ONNX 时才装，导出完可以卸载。CPU 版即可。
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# torch>=1.13.0

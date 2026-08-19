@@ -2,8 +2,23 @@
 setlocal EnableDelayedExpansion
 
 :: ════════════════════════════════════════════════════════════════
-::  VideoToolbox - 私有环境检测与安装工具 v2.4
+::  VideoToolbox - 私有环境检测与安装工具 v2.5
 :: ════════════════════════════════════════════════════════════════
+::
+::  v2.5 变更 (去马赛克功能重构后同步):
+::    1. onnxruntime (CPU) -> onnxruntime-directml (Windows GPU 加速)
+::       实测 DirectML 比 CPU 快 50+ 倍，且不需要单独装 CUDA/cuDNN
+::    2. 新增 onnx 依赖检测 (Real-ESRGAN 分块推理需要它改写模型形状)
+::    3. 新增去马赛克模型检测: realesrgan-x4plus.onnx /
+::       mosaic_position.onnx + clean_youknow_video.onnx (DeepMosaics)
+::       这两类模型体积大且托管在 HuggingFace/GitHub, 网络不稳定时
+::       无法用 curl 直接下载, 因此只检测不自动拉取, 改为提示手动获取
+::    4. pip 主镜像由清华改为阿里云 (清华源 /simple/torch/ 索引页
+::       在实测环境下出现 SSL EOF 断连, 阿里云更稳定且速度相近)
+::       所有 pip 安装均加入备用镜像自动重试
+::    5. torch 不再列为必须依赖 —— 仅 export_deepmosaics_onnx.py
+::       (一次性把 DeepMosaics 的 .pth 转成 ONNX) 需要它, 主程序
+::       运行期完全不依赖 torch
 ::
 ::  v2.4 变更:
 ::    1. 新增 onnxruntime (CPU) 作为必须依赖项
@@ -18,14 +33,21 @@ setlocal EnableDelayedExpansion
 ::
 :: ════════════════════════════════════════════════════════════════
 
-title VideoToolbox - 环境检测 v2.4
+title VideoToolbox - 环境检测 v2.5
 
 :: ── 配置 ──
 set "SCRIPT_NAME=main.py"
 set "REQUIREMENTS_FILE=requirements.txt"
 set "MODELS_DIR=models"
-set "PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple"
-set "PIP_TRUSTED=pypi.tuna.tsinghua.edu.cn"
+set "CHARSET_DIR=charsets"
+set "DM_EXPORT_DIR=dmp"
+set "DM_EXPORT_SCRIPT=export_deepmosaics_onnx.py"
+
+:: pip 主镜像 (阿里云) + 备用镜像 (清华), 主镜像失败自动重试备用
+set "PIP_MIRROR=https://mirrors.aliyun.com/pypi/simple"
+set "PIP_TRUSTED=mirrors.aliyun.com"
+set "PIP_MIRROR2=https://pypi.tuna.tsinghua.edu.cn/simple"
+set "PIP_TRUSTED2=pypi.tuna.tsinghua.edu.cn"
 
 :: ── 私有环境搜索列表 ──
 set "VENV_SEARCH=venv .venv env python_env"
@@ -91,7 +113,7 @@ goto :HasFailures
 echo.
 echo   [OK] 环境检测全部通过！
 if !WARN! GTR 0 (
-    echo   [!!] !WARN! 个警告项, 不影响基础运行
+    echo   [^^!^^!] !WARN! 个警告项, 不影响基础运行
 )
 echo.
 echo   [Y] 启动程序   [N] 退出
@@ -190,6 +212,33 @@ goto :EOF
 
 
 :: ════════════════════════════════════════════════════════════════
+::  pip 安装 (主镜像失败自动重试备用镜像)
+::  用法: call :PipInstall "显示名" 包名或参数...
+:: ════════════════════════════════════════════════════════════════
+
+:PipInstall
+set "_pi_desc=%~1"
+set "_pi_args="
+shift
+:_PipInstallCollect
+if "%~1"=="" goto :_PipInstallRun
+set "_pi_args=!_pi_args! %1"
+shift
+goto :_PipInstallCollect
+
+:_PipInstallRun
+echo     [安装] !_pi_desc! ...
+"!VENV_PYTHON!" -m pip install !_pi_args! -i %PIP_MIRROR% --trusted-host %PIP_TRUSTED% --prefer-binary --no-warn-script-location
+if !errorlevel! EQU 0 goto :EOF
+echo     [^^!^^!] 主镜像 (阿里云) 失败, 切换备用镜像 (清华) 重试...
+"!VENV_PYTHON!" -m pip install !_pi_args! -i %PIP_MIRROR2% --trusted-host %PIP_TRUSTED2% --prefer-binary --no-warn-script-location
+if !errorlevel! NEQ 0 (
+    echo     [XX] !_pi_desc! 安装失败 (两个镜像均不可用)
+)
+goto :EOF
+
+
+:: ════════════════════════════════════════════════════════════════
 ::  [1] 查找并激活私有环境
 :: ════════════════════════════════════════════════════════════════
 
@@ -236,7 +285,7 @@ if not "!VENV_DIR!"=="" (
     goto :EOF
 )
 
-echo     [!!] 当前目录未找到私有环境
+echo     [^^!^^!] 当前目录未找到私有环境
 echo          已搜索: %VENV_SEARCH%
 echo.
 echo     是否立即创建私有环境？
@@ -263,7 +312,7 @@ for %%P in (python python3 py) do (
         if !errorlevel! EQU 0 (
             set "VENV_PYTHON=%%P"
             set "_found=1"
-            echo     [!!] 使用系统 Python: %%P
+            echo     [^^!^^!] 使用系统 Python: %%P
             echo          建议: 创建私有环境隔离依赖
         )
     )
@@ -309,7 +358,7 @@ if not "!VINPUT!"=="" set "NEW_VENV=!VINPUT!"
 
 if exist "!NEW_VENV!" (
     echo.
-    echo     [!!] 目录 !NEW_VENV! 已存在
+    echo     [^^!^^!] 目录 !NEW_VENV! 已存在
     echo     [1] 删除重建   [2] 跳过
     set /p "RB=     请选择: "
     if "!RB!"=="1" (
@@ -422,7 +471,7 @@ goto :EOF
 
 
 :: ════════════════════════════════════════════════════════════════
-::  [3] 检测依赖包 (含 onnxruntime)
+::  [3] 检测依赖包 (含 onnxruntime-directml / onnx)
 :: ════════════════════════════════════════════════════════════════
 
 :CheckPackages
@@ -457,16 +506,76 @@ if not "!_spver!"=="" (
     call :ItemWarn "scipy" "未安装 (可选)"
 )
 
-:: ── onnxruntime (必须, CPU版) ──
+:: ── onnxruntime (必须, 检测 DirectML/CUDA/CPU 后端) ──
 set /a TOTAL+=1
-call :GetModuleVersion onnxruntime _ortver
-if not "!_ortver!"=="" (
-    call :ItemPass "onnxruntime" "!_ortver! (CPU)"
+call :CheckOnnxRuntime
+
+:: ── onnx (Real-ESRGAN 去马赛克需要它改写模型输入形状) ──
+set /a TOTAL+=1
+call :GetModuleVersion onnx _onnxver
+if not "!_onnxver!"=="" (
+    call :ItemPass "onnx" "!_onnxver! (Real-ESRGAN 形状适配)"
 ) else (
-    call :ItemFail "onnxruntime" "未安装 (推理引擎, 必须)"
-    set "FAIL_LIST=!FAIL_LIST!onnxruntime "
+    call :ItemWarn "onnx" "未安装 (仅影响 Real-ESRGAN, DeepMosaics/传统方法不受影响)"
 )
 
+goto :EOF
+
+
+:: ────────────────────────────────────────────────────────────
+::  探测 onnxruntime 及其推理后端 (DirectML / CUDA / CPU), 不打印
+::  结果写入 _ortver / _orttag, 供 :CheckOnnxRuntime 与 :AutoFix 复用
+:: ────────────────────────────────────────────────────────────
+:DetectOnnxRuntime
+> "!_PROBE!" (
+    echo try:
+    echo     import onnxruntime as ort
+    echo     provs = ort.get_available_providers(^)
+    echo     if 'DmlExecutionProvider' in provs:
+    echo         tag = 'DirectML'
+    echo     elif 'CUDAExecutionProvider' in provs:
+    echo         tag = 'CUDA'
+    echo     else:
+    echo         tag = 'CPU'
+    echo     print(ort.__version__ + '^|' + tag^)
+    echo except ImportError:
+    echo     pass
+)
+call :RunPythonGetOutput
+set "_ortver="
+set "_orttag="
+if exist "!_RESULT!" (
+    for /f "usebackq tokens=1,2 delims=|" %%A in ("!_RESULT!") do (
+        set "_ortver=%%A"
+        set "_orttag=%%B"
+    )
+    del "!_RESULT!" 2>nul
+)
+goto :EOF
+
+
+:: ────────────────────────────────────────────────────────────
+::  检测 onnxruntime 并按检测报告格式打印 (供 :CheckPackages 使用)
+:: ────────────────────────────────────────────────────────────
+:CheckOnnxRuntime
+call :DetectOnnxRuntime
+
+if "!_ortver!"=="" (
+    call :ItemFail "onnxruntime" "未安装 (推理引擎, 必须)"
+    set "FAIL_LIST=!FAIL_LIST!onnxruntime "
+    goto :EOF
+)
+
+if "!_orttag!"=="DirectML" (
+    call :ItemPass "onnxruntime" "!_ortver! [DirectML GPU 加速]"
+    goto :EOF
+)
+if "!_orttag!"=="CUDA" (
+    call :ItemPass "onnxruntime" "!_ortver! [CUDA GPU 加速]"
+    goto :EOF
+)
+call :ItemPass "onnxruntime" "!_ortver! [CPU 模式, 较慢]"
+echo          建议: pip install onnxruntime-directml 提速 50+ 倍 ^(Windows, 无需装CUDA^)
 goto :EOF
 
 
@@ -536,6 +645,45 @@ if exist "%MODELS_DIR%\frozen_east_text_detection.pb" (
 )
 
 set /a TOTAL+=1
+if exist "%MODELS_DIR%\rvm_mobilenetv3_fp32.onnx" (
+    call :ItemPass "人像分割模型" "RVM 已就绪"
+) else (
+    call :ItemWarn "人像分割模型" "未下载 (背景虚化会退回人脸框启发式)"
+)
+
+:: 字幕 OCR 要模型和字符表配套齐全才算可用
+set /a TOTAL+=1
+set "_ocr_have="
+if exist "%MODELS_DIR%\text_recognition_CRNN_CN_2021nov.onnx" set "_ocr_have=!_ocr_have!中文 "
+if exist "%MODELS_DIR%\text_recognition_CRNN_EN_2021sep.onnx" set "_ocr_have=!_ocr_have!英文 "
+set "_cs_ok=1"
+if not exist "%CHARSET_DIR%\charset_3944_CN.txt" set "_cs_ok=0"
+if not exist "%CHARSET_DIR%\charset_36_EN.txt" set "_cs_ok=0"
+if !_cs_ok! EQU 0 (
+    call :ItemWarn "字幕OCR模型" "%CHARSET_DIR%\ 字符表缺失, OCR 无法使用"
+) else if not "!_ocr_have!"=="" (
+    call :ItemPass "字幕OCR模型" "!_ocr_have!"
+) else (
+    call :ItemWarn "字幕OCR模型" "未下载"
+)
+
+:: ── 去马赛克模型 (Real-ESRGAN 超分 / DeepMosaics 生成式重建) ──
+:: 体积大且托管在 HuggingFace/GitHub, 网络不稳定时无法用 curl 直接下载,
+:: 因此这里只检测, 不在 :DownloadModels 里自动拉取, 需要时看 :ShowHelp 里的手动获取说明
+set /a TOTAL+=1
+set "_dm_have="
+if exist "%MODELS_DIR%\realesrgan-x4plus.onnx" set "_dm_have=!_dm_have!Real-ESRGAN "
+set "_dmp_ok=1"
+if not exist "%MODELS_DIR%\mosaic_position.onnx" set "_dmp_ok=0"
+if not exist "%MODELS_DIR%\clean_youknow_video.onnx" set "_dmp_ok=0"
+if !_dmp_ok! EQU 1 set "_dm_have=!_dm_have!DeepMosaics "
+if not "!_dm_have!"=="" (
+    call :ItemPass "去马赛克模型" "!_dm_have!(传统方法始终可用)"
+) else (
+    call :ItemWarn "去马赛克模型" "未下载 (仅传统方法可用, 见帮助[5]手动获取)"
+)
+
+set /a TOTAL+=1
 if exist "%SCRIPT_NAME%" (
     for %%A in ("%SCRIPT_NAME%") do (
         call :ItemPass "主程序" "%SCRIPT_NAME% (%%~zA bytes)"
@@ -549,7 +697,7 @@ goto :EOF
 
 
 :: ════════════════════════════════════════════════════════════════
-::  自动修复 (含 onnxruntime)
+::  自动修复 (含 onnxruntime-directml / onnx)
 :: ════════════════════════════════════════════════════════════════
 
 :AutoFix
@@ -563,7 +711,7 @@ if "!VENV_PYTHON!"=="" (
 )
 
 if "!VENV_DIR!"=="" (
-    echo   [!!] 无私有环境, 先创建...
+    echo   [^^!^^!] 无私有环境, 先创建...
     call :CreateVenvFlow
     if "!VENV_DIR!"=="" goto :EOF
 )
@@ -575,32 +723,50 @@ call :GetModuleVersion cv2 _cv2ver
 if not "!_cv2ver!"=="" (
     echo     [跳过] opencv-python 已安装 ^(!_cv2ver!^)
 ) else (
-    echo     [安装] opencv-python ...
-    "!VENV_PYTHON!" -m pip install opencv-python -i %PIP_MIRROR% --trusted-host %PIP_TRUSTED% --prefer-binary --no-warn-script-location
+    call :PipInstall "opencv-python" opencv-python
 )
 
 call :GetModuleVersion numpy _npver
 if not "!_npver!"=="" (
     echo     [跳过] numpy 已安装 ^(!_npver!^)
 ) else (
-    echo     [安装] numpy ...
-    "!VENV_PYTHON!" -m pip install numpy -i %PIP_MIRROR% --trusted-host %PIP_TRUSTED% --prefer-binary --no-warn-script-location
+    call :PipInstall "numpy" numpy
 )
 
 call :GetModuleVersion scipy _spver
 if not "!_spver!"=="" (
     echo     [跳过] scipy 已安装 ^(!_spver!^)
 ) else (
-    echo     [安装] scipy ...
-    "!VENV_PYTHON!" -m pip install scipy -i %PIP_MIRROR% --trusted-host %PIP_TRUSTED% --prefer-binary --no-warn-script-location
+    call :PipInstall "scipy" scipy
 )
 
-call :GetModuleVersion onnxruntime _ortver
-if not "!_ortver!"=="" (
-    echo     [跳过] onnxruntime 已安装 ^(!_ortver!^)
+call :DetectOnnxRuntime
+if "!_ortver!"=="" (
+    call :PipInstall "onnxruntime-directml (GPU加速)" onnxruntime-directml
+    goto :_AutoFixOrtDone
+)
+if "!_orttag!"=="DirectML" goto :_AutoFixOrtSkip
+if "!_orttag!"=="CUDA" goto :_AutoFixOrtSkip
+
+echo.
+echo     [^^!^^!] 当前 onnxruntime 是 CPU 模式 ^(!_ortver!^), 去马赛克会很慢
+echo          切换到 onnxruntime-directml 可提速 50+ 倍 ^(Windows GPU, 无需装CUDA^)
+set /p "_UPG=     是否切换？会先卸载当前 onnxruntime (Y/N): "
+if /i "!_UPG!"=="Y" (
+    "!VENV_PYTHON!" -m pip uninstall -y onnxruntime onnxruntime-gpu >nul 2>nul
+    call :PipInstall "onnxruntime-directml" onnxruntime-directml
+)
+goto :_AutoFixOrtDone
+
+:_AutoFixOrtSkip
+echo     [跳过] onnxruntime 已安装 ^(!_ortver! [!_orttag!]^)
+
+:_AutoFixOrtDone
+call :GetModuleVersion onnx _onnxver
+if not "!_onnxver!"=="" (
+    echo     [跳过] onnx 已安装 ^(!_onnxver!^)
 ) else (
-    echo     [安装] onnxruntime ...
-    "!VENV_PYTHON!" -m pip install onnxruntime -i %PIP_MIRROR% --trusted-host %PIP_TRUSTED% --prefer-binary --no-warn-script-location
+    call :PipInstall "onnx (Real-ESRGAN 形状适配)" onnx
 )
 
 echo.
@@ -637,7 +803,7 @@ goto :EOF
 
 
 :: ════════════════════════════════════════════════════════════════
-::  安装 pip 依赖 (含 onnxruntime)
+::  安装 pip 依赖 (含 onnxruntime-directml / onnx)
 :: ════════════════════════════════════════════════════════════════
 
 :InstallPackages
@@ -654,12 +820,12 @@ if not "!VENV_DIR!"=="" (
     echo     环境: !VENV_DIR!\
     echo     安装到: !VENV_DIR!\Lib\site-packages\
 ) else (
-    echo     [!!] 将安装到系统环境
+    echo     [^^!^^!] 将安装到系统环境
     set /p "CONF=     继续？ (Y/N): "
     if /i not "!CONF!"=="Y" goto :EOF
 )
 
-echo     镜像: %PIP_MIRROR%
+echo     主镜像: %PIP_MIRROR%  (备用: %PIP_MIRROR2%)
 echo.
 
 if exist "%REQUIREMENTS_FILE%" (
@@ -669,24 +835,35 @@ if exist "%REQUIREMENTS_FILE%" (
         echo     [OK] 安装完成
         goto :EOF
     )
-    echo     [!!] requirements.txt 部分失败, 改为逐个安装
+    echo     [^^!^^!] requirements.txt 主镜像失败, 切换备用镜像重试...
+    "!VENV_PYTHON!" -m pip install -r "%REQUIREMENTS_FILE%" -i %PIP_MIRROR2% --trusted-host %PIP_TRUSTED2% --prefer-binary --no-warn-script-location
+    if !errorlevel! EQU 0 (
+        echo     [OK] 安装完成
+        goto :EOF
+    )
+    echo     [^^!^^!] requirements.txt 仍失败, 改为逐个安装
     echo.
 )
 
-echo     [1/4] opencv-python ...
-"!VENV_PYTHON!" -m pip install opencv-python -i %PIP_MIRROR% --trusted-host %PIP_TRUSTED% --prefer-binary --no-warn-script-location
+echo     [1/5] opencv-python ...
+call :PipInstall "opencv-python" opencv-python
 
-echo     [2/4] numpy ...
-"!VENV_PYTHON!" -m pip install numpy -i %PIP_MIRROR% --trusted-host %PIP_TRUSTED% --prefer-binary --no-warn-script-location
+echo     [2/5] numpy ...
+call :PipInstall "numpy" numpy
 
-echo     [3/4] scipy ...
-"!VENV_PYTHON!" -m pip install scipy -i %PIP_MIRROR% --trusted-host %PIP_TRUSTED% --prefer-binary --no-warn-script-location
+echo     [3/5] scipy ...
+call :PipInstall "scipy" scipy
 
-echo     [4/4] onnxruntime ...
-"!VENV_PYTHON!" -m pip install onnxruntime -i %PIP_MIRROR% --trusted-host %PIP_TRUSTED% --prefer-binary --no-warn-script-location
+echo     [4/5] onnxruntime-directml (Windows GPU 加速, 无需装CUDA) ...
+call :PipInstall "onnxruntime-directml" onnxruntime-directml
+
+echo     [5/5] onnx (Real-ESRGAN 去马赛克形状适配) ...
+call :PipInstall "onnx" onnx
 
 echo.
 echo     安装完成
+echo     [提示] torch 仅 export_deepmosaics_onnx.py (一次性模型导出) 需要,
+echo            日常运行不需要装 torch
 goto :EOF
 
 
@@ -705,7 +882,7 @@ if not exist "%MODELS_DIR%" mkdir "%MODELS_DIR%"
 set /a _skip=0
 set /a _dl=0
 
-echo   [1/4] 人脸检测模型
+echo   [1/6] 人脸检测模型
 
 if exist "%MODELS_DIR%\deploy.prototxt" (
     echo     [跳过] deploy.prototxt
@@ -726,7 +903,7 @@ if exist "%MODELS_DIR%\res10_300x300_ssd_iter_140000.caffemodel" (
 )
 
 echo.
-echo   [2/4] YOLOv4-tiny
+echo   [2/6] YOLOv4-tiny
 
 if exist "%MODELS_DIR%\yolov4-tiny.cfg" (
     echo     [跳过] yolov4-tiny.cfg
@@ -756,7 +933,7 @@ if exist "%MODELS_DIR%\coco.names" (
 )
 
 echo.
-echo   [3/4] 风格迁移模型
+echo   [3/6] 风格迁移模型
 
 set "STYLE_URL=https://cs.stanford.edu/people/jcjohns/fast-neural-style/models"
 call :DLStyleIfMissing "instance_norm/mosaic.t7" "mosaic.t7"
@@ -769,7 +946,7 @@ call :DLStyleIfMissing "eccv16/la_muse.t7" "la_muse.t7"
 call :DLStyleIfMissing "eccv16/composition_vii.t7" "composition_vii.t7"
 
 echo.
-echo   [4/4] EAST 文字检测
+echo   [4/6] EAST 文字检测
 
 if exist "%MODELS_DIR%\frozen_east_text_detection.pb" (
     echo     [跳过] frozen_east_text_detection.pb
@@ -778,6 +955,62 @@ if exist "%MODELS_DIR%\frozen_east_text_detection.pb" (
     echo     [下载] frozen_east_text_detection.pb ~96MB ...
     call :DL "https://raw.githubusercontent.com/oyyd/frozen_east_text_detection.pb/master/frozen_east_text_detection.pb" "%MODELS_DIR%\frozen_east_text_detection.pb"
     set /a _dl+=1
+)
+
+echo.
+echo   [5/6] 人像分割 / 字幕识别模型
+
+if exist "%MODELS_DIR%\rvm_mobilenetv3_fp32.onnx" (
+    echo     [跳过] rvm_mobilenetv3_fp32.onnx
+    set /a _skip+=1
+) else (
+    echo     [下载] rvm_mobilenetv3_fp32.onnx ~15MB ...
+    call :DL "https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx" "%MODELS_DIR%\rvm_mobilenetv3_fp32.onnx"
+    set /a _dl+=1
+)
+
+if exist "%MODELS_DIR%\text_recognition_CRNN_CN_2021nov.onnx" (
+    echo     [跳过] text_recognition_CRNN_CN_2021nov.onnx
+    set /a _skip+=1
+) else (
+    echo     [下载] text_recognition_CRNN_CN_2021nov.onnx ~69MB ...
+    call :DL "https://github.com/opencv/opencv_zoo/raw/main/models/text_recognition_crnn/text_recognition_CRNN_CN_2021nov.onnx" "%MODELS_DIR%\text_recognition_CRNN_CN_2021nov.onnx"
+    set /a _dl+=1
+)
+
+if exist "%MODELS_DIR%\text_recognition_CRNN_EN_2021sep.onnx" (
+    echo     [跳过] text_recognition_CRNN_EN_2021sep.onnx
+    set /a _skip+=1
+) else (
+    echo     [下载] text_recognition_CRNN_EN_2021sep.onnx ~32MB ...
+    call :DL "https://github.com/opencv/opencv_zoo/raw/main/models/text_recognition_crnn/text_recognition_CRNN_EN_2021sep.onnx" "%MODELS_DIR%\text_recognition_CRNN_EN_2021sep.onnx"
+    set /a _dl+=1
+)
+
+if not exist "%CHARSET_DIR%\charset_3944_CN.txt" (
+    echo     [^^!^^!] 缺少 %CHARSET_DIR%\charset_3944_CN.txt, 字幕 OCR 无法使用
+    echo          这个文件随项目一起分发, 请从项目里补回来
+)
+
+echo.
+echo   [6/6] 去马赛克模型 (Real-ESRGAN / DeepMosaics)
+
+set "_dm_ok=1"
+if not exist "%MODELS_DIR%\realesrgan-x4plus.onnx" set "_dm_ok=0"
+if not exist "%MODELS_DIR%\mosaic_position.onnx" set "_dm_ok=0"
+if not exist "%MODELS_DIR%\clean_youknow_video.onnx" set "_dm_ok=0"
+if !_dm_ok! EQU 1 (
+    echo     [跳过] 已齐全
+    set /a _skip+=1
+) else (
+    echo     [^^!^^!] 体积大 ^(共 ~320MB^) 且托管在 HuggingFace/GitHub,
+    echo          在此网络环境下无法用 curl 稳定下载, 不自动拉取。
+    echo          手动获取步骤 ^(详见帮助[5]^):
+    echo            1. Real-ESRGAN: 下载 realesrgan-x4plus.onnx 放入 %MODELS_DIR%\
+    echo            2. DeepMosaics: 需要 %DM_EXPORT_DIR%\ 下的 .pth 权重,
+    echo               装好 torch 后运行:
+    echo               "!VENV_PYTHON!" %DM_EXPORT_SCRIPT% --src %DM_EXPORT_DIR% --dst %MODELS_DIR%
+    echo               导出完成后可以 pip uninstall torch ^(运行期不需要它^)
 )
 
 echo.
@@ -861,14 +1094,37 @@ echo   3. 选 [1] 自动修复
 echo   4. 检测通过后选 [Y] 启动
 echo.
 echo   === 依赖清单 ===
-echo   [必须] opencv-python   - 图像/视频处理核心
-echo   [必须] numpy           - 数组计算
-echo   [必须] onnxruntime     - ONNX 推理引擎 (CPU)
-echo   [可选] scipy           - 科学计算
-echo   [可选] FFmpeg          - 视频转码/GIF
+echo   [必须] opencv-python         - 图像/视频处理核心
+echo   [必须] numpy                 - 数组计算
+echo   [必须] onnxruntime-directml  - ONNX 推理引擎, Windows GPU 加速
+echo                                  (比纯 CPU 版快 50+ 倍, 不需要装 CUDA/cuDNN;
+echo                                   有独立 NVIDIA 显卡也可用 onnxruntime-gpu 代替)
+echo   [必须] onnx                  - Real-ESRGAN 分块推理时改写模型输入形状
+echo   [可选] scipy                 - 科学计算
+echo   [可选] FFmpeg                - 视频转码/GIF
+echo   [一次性] torch               - 只有重新导出 DeepMosaics 模型时才需要,
+echo                                  日常运行/打包给别人用都不需要装它
 echo.
-echo   === v2.4 更新 ===
-echo   新增 onnxruntime (CPU) 为必须依赖
+echo   === 去马赛克模型 (体积大, 不随代码仓库分发) ===
+echo   models\realesrgan-x4plus.onnx           - Real-ESRGAN 超分, 对马赛克本身无效,
+echo                                              只用于普通画质增强/放大
+echo   models\mosaic_position.onnx             - DeepMosaics 马赛克区域检测 (BiSeNet)
+echo   models\clean_youknow_video.onnx         - DeepMosaics 生成式重建 (BVDNet),
+echo                                              真正能去马赛克, 有前后帧时序平滑
+echo.
+echo   获取方式 (任选, 传统方法始终可用不受影响):
+echo     A. 直接找一份现成的 .onnx 放进 models\ 目录即可, 文件名要对上
+echo     B. 从源码自己导出 (适合已经有 dmp\ 目录和 .pth 权重的情况):
+echo        1) pip install torch  (装 CPU 版即可, 只是临时用来导出)
+echo        2) "!VENV_PYTHON!" export_deepmosaics_onnx.py --src dmp --dst models
+echo        3) 导出成功后可以 pip uninstall torch, 主程序不再需要它
+echo.
+echo   === v2.5 更新 (本次去马赛克重构) ===
+echo   1. onnxruntime -^> onnxruntime-directml, 检测项会显示当前用的是
+echo      DirectML/CUDA/CPU 哪种后端, CPU 模式会提示升级
+echo   2. 新增 onnx 依赖检测 (缺失只影响 Real-ESRGAN, 不影响 DeepMosaics)
+echo   3. 新增去马赛克模型检测 (不自动下载, 见上方"获取方式")
+echo   4. pip 主镜像改为阿里云, 清华源作为备用自动重试
 echo.
 goto :EOF
 
@@ -903,7 +1159,7 @@ goto :EOF
 :ItemWarn
 set /a WARN+=1
 set "_n=%~1                      "
-echo     [!!] %_n:~0,22% %~2
+echo     [^^!^^!] %_n:~0,22% %~2
 goto :EOF
 
 :Report
@@ -933,7 +1189,7 @@ goto :EOF
 echo.
 echo   ==================================================
 echo.
-echo     VideoToolbox - 环境检测与安装工具 v2.4
+echo     VideoToolbox - 环境检测与安装工具 v2.5
 echo     使用项目私有 Python 环境 (无需管理员权限)
 echo.
 echo   ==================================================
