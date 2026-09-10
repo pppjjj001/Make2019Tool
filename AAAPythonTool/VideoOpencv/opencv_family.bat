@@ -667,6 +667,17 @@ if !_cs_ok! EQU 0 (
     call :ItemWarn "字幕OCR模型" "未下载"
 )
 
+set /a TOTAL+=1
+set "_dn_have="
+if exist "%MODELS_DIR%\dncnn_color.onnx" set "_dn_have=!_dn_have!DnCNN "
+if exist "%MODELS_DIR%\fastdvdnet_s25.onnx" set "_dn_have=!_dn_have!FastDVDnet "
+if exist "%MODELS_DIR%\scunet_color_real_psnr.onnx" if exist "%MODELS_DIR%\scunet_color_real_psnr.onnx.data" set "_dn_have=!_dn_have!SCUNet "
+if not "!_dn_have!"=="" (
+    call :ItemPass "视频降噪模型" "!_dn_have!"
+) else (
+    call :ItemWarn "视频降噪模型" "未下载 (快档 FFmpeg 滤镜仍可用)"
+)
+
 :: ── 去马赛克模型 (Real-ESRGAN 超分 / DeepMosaics 生成式重建) ──
 :: 体积大且托管在 HuggingFace/GitHub, 网络不稳定时无法用 curl 直接下载,
 :: 因此这里只检测, 不在 :DownloadModels 里自动拉取, 需要时看 :ShowHelp 里的手动获取说明
@@ -882,7 +893,7 @@ if not exist "%MODELS_DIR%" mkdir "%MODELS_DIR%"
 set /a _skip=0
 set /a _dl=0
 
-echo   [1/6] 人脸检测模型
+echo   [1/7] 人脸检测模型
 
 if exist "%MODELS_DIR%\deploy.prototxt" (
     echo     [跳过] deploy.prototxt
@@ -903,7 +914,7 @@ if exist "%MODELS_DIR%\res10_300x300_ssd_iter_140000.caffemodel" (
 )
 
 echo.
-echo   [2/6] YOLOv4-tiny
+echo   [2/7] YOLOv4-tiny
 
 if exist "%MODELS_DIR%\yolov4-tiny.cfg" (
     echo     [跳过] yolov4-tiny.cfg
@@ -933,7 +944,7 @@ if exist "%MODELS_DIR%\coco.names" (
 )
 
 echo.
-echo   [3/6] 风格迁移模型
+echo   [3/7] 风格迁移模型
 
 set "STYLE_URL=https://cs.stanford.edu/people/jcjohns/fast-neural-style/models"
 call :DLStyleIfMissing "instance_norm/mosaic.t7" "mosaic.t7"
@@ -946,7 +957,7 @@ call :DLStyleIfMissing "eccv16/la_muse.t7" "la_muse.t7"
 call :DLStyleIfMissing "eccv16/composition_vii.t7" "composition_vii.t7"
 
 echo.
-echo   [4/6] EAST 文字检测
+echo   [4/7] EAST 文字检测
 
 if exist "%MODELS_DIR%\frozen_east_text_detection.pb" (
     echo     [跳过] frozen_east_text_detection.pb
@@ -958,7 +969,7 @@ if exist "%MODELS_DIR%\frozen_east_text_detection.pb" (
 )
 
 echo.
-echo   [5/6] 人像分割 / 字幕识别模型
+echo   [5/7] 人像分割 / 字幕识别模型
 
 if exist "%MODELS_DIR%\rvm_mobilenetv3_fp32.onnx" (
     echo     [跳过] rvm_mobilenetv3_fp32.onnx
@@ -993,7 +1004,56 @@ if not exist "%CHARSET_DIR%\charset_3944_CN.txt" (
 )
 
 echo.
-echo   [6/6] 去马赛克模型 (Real-ESRGAN / DeepMosaics)
+echo   [6/7] 视频降噪模型
+
+if exist "%MODELS_DIR%\dncnn_color.onnx" (
+    echo     [跳过] dncnn_color.onnx
+    set /a _skip+=1
+) else (
+    echo     [下载] dncnn_color.onnx ~2.6MB ...
+    call :DL "https://github.com/ikeno-web/npuscale/releases/download/v1.2/dncnn_color.onnx" "%MODELS_DIR%\dncnn_color.onnx"
+    set /a _dl+=1
+)
+
+if exist "%MODELS_DIR%\fastdvdnet_s15.onnx" (
+    echo     [跳过] fastdvdnet_s15.onnx
+    set /a _skip+=1
+) else (
+    echo     [下载] fastdvdnet_s15.onnx ~9.5MB ...
+    call :DL "https://github.com/ikeno-web/npuscale/releases/download/v1.3/fastdvdnet_s15.onnx" "%MODELS_DIR%\fastdvdnet_s15.onnx"
+    set /a _dl+=1
+)
+
+if exist "%MODELS_DIR%\fastdvdnet_s25.onnx" (
+    echo     [跳过] fastdvdnet_s25.onnx
+    set /a _skip+=1
+) else (
+    echo     [下载] fastdvdnet_s25.onnx ~9.5MB ...
+    call :DL "https://github.com/ikeno-web/npuscale/releases/download/v1.3/fastdvdnet_s25.onnx" "%MODELS_DIR%\fastdvdnet_s25.onnx"
+    set /a _dl+=1
+)
+
+if exist "%MODELS_DIR%\fastdvdnet_s50.onnx" (
+    echo     [跳过] fastdvdnet_s50.onnx
+    set /a _skip+=1
+) else (
+    echo     [下载] fastdvdnet_s50.onnx ~9.5MB ...
+    call :DL "https://github.com/ikeno-web/npuscale/releases/download/v1.3/fastdvdnet_s50.onnx" "%MODELS_DIR%\fastdvdnet_s50.onnx"
+    set /a _dl+=1
+)
+
+if exist "%MODELS_DIR%\scunet_color_real_psnr.onnx" if exist "%MODELS_DIR%\scunet_color_real_psnr.onnx.data" (
+    echo     [跳过] scunet_color_real_psnr.onnx
+    set /a _skip+=1
+) else (
+    echo     [下载] scunet_color_real_psnr.onnx + .data ~74MB ...
+    call :DL "https://huggingface.co/Heliosoph/scunet-onnx/resolve/main/scunet_color_real_psnr.onnx" "%MODELS_DIR%\scunet_color_real_psnr.onnx"
+    call :DL "https://huggingface.co/Heliosoph/scunet-onnx/resolve/main/scunet_color_real_psnr.onnx.data" "%MODELS_DIR%\scunet_color_real_psnr.onnx.data"
+    set /a _dl+=1
+)
+
+echo.
+echo   [7/7] 去马赛克模型 (Real-ESRGAN / DeepMosaics)
 
 set "_dm_ok=1"
 if not exist "%MODELS_DIR%\realesrgan-x4plus.onnx" set "_dm_ok=0"

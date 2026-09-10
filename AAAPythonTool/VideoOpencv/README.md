@@ -1,6 +1,6 @@
 # VideoToolbox
 
-一个基于 **OpenCV + Tkinter** 的 Python 视频处理全家桶，内置 35 种视频/图像处理功能，涵盖基础剪辑、画面调整、特效滤镜、水印/调色/字幕、DNN AI 能力（人脸/物体检测、风格迁移、人像分割、字幕 OCR、去马赛克等）与分析工具，支持多功能串联的流程组合模式。
+一个基于 **OpenCV + Tkinter** 的 Python 视频处理全家桶，内置 36 种视频/图像处理功能，涵盖基础剪辑、画面调整、特效滤镜、水印/调色/字幕、DNN AI 能力（人脸/物体检测、风格迁移、人像分割、字幕 OCR、视频降噪、去马赛克等）与分析工具，支持多功能串联的流程组合模式。日常推理走 **OpenCV DNN + onnxruntime**；不能转 ONNX 的官方 `.pth`（目前默认 VRT 008 降噪）走独立子窗口，**全程本机**，主程序不 `import torch`。
 
 ## 功能清单
 
@@ -17,41 +17,42 @@
 8. 亮度/对比度/饱和度
 9. 色彩空间转换（灰度/HSV/LAB）
 10. 直方图均衡化
-11. 锐化/模糊/降噪
+11. 锐化/模糊（传统空域，仍带轻度非局部均值）
+12. 视频降噪（主窗口：FFmpeg 快档 / DnCNN / SCUNet / FastDVDnet；`.pth` 走独立入口，见下方专门说明）
 
 ### 特效滤镜
-12. 铅笔素描
-13. 卡通化
-14. 浮雕效果
-15. 边缘检测（Canny/Sobel/Laplacian）
-16. 怀旧/冷暖色调
-17. 马赛克/像素化
-18. 晕影效果
+13. 铅笔素描
+14. 卡通化
+15. 浮雕效果
+16. 边缘检测（Canny/Sobel/Laplacian）
+17. 怀旧/冷暖色调
+18. 马赛克/像素化
+19. 晕影效果
 
 ### 水印 / 调色 / 字幕
-19. 水印添加（文字或图片，支持中文、旋转、平铺、九宫格定位，见下方专门说明）
-20. 水印去除（区域 inpaint / 模糊 / 像素化，可配合智能蒙版，见下方专门说明）
-21. LUT 颜色分级（`.cube` / LUT 贴图 / 7 种内置预设，见下方专门说明）
-22. 字幕烧录（SRT / ASS 解析 + 描边渲染，见下方专门说明）
+20. 水印添加（文字或图片，支持中文、旋转、平铺、九宫格定位，见下方专门说明）
+21. 水印去除（区域 inpaint / 模糊 / 像素化，可配合智能蒙版，见下方专门说明）
+22. LUT 颜色分级（`.cube` / LUT 贴图 / 7 种内置预设，见下方专门说明）
+23. 字幕烧录（SRT / ASS 解析 + 描边渲染，见下方专门说明）
 
 ### DNN AI 功能
-23. 人脸检测（SSD/Caffe）
-24. 物体检测（YOLOv4-tiny）
-25. 风格迁移（Neural Style Transfer + 参考图模式）
-26. 人脸马赛克（检测 + 模糊）
-27. 背景虚化 / 人像分割（RobustVideoMatting，可虚化/换纯色/换图片，见下方专门说明）
-28. 文字检测（EAST）
-29. 字幕 OCR 提取（EAST 检测 + CRNN 识别 → 导出 SRT，见下方专门说明）
-30. 去马赛克/超分重建（Real-ESRGAN / DeepMosaics / ESPCN，见下方专门说明）
+24. 人脸检测（SSD/Caffe）
+25. 物体检测（YOLOv4-tiny）
+26. 风格迁移（Neural Style Transfer + 参考图模式）
+27. 人脸马赛克（检测 + 模糊）
+28. 背景虚化 / 人像分割（RobustVideoMatting，可虚化/换纯色/换图片，见下方专门说明）
+29. 文字检测（EAST）
+30. 字幕 OCR 提取（EAST 检测 + CRNN 识别 → 导出 SRT，见下方专门说明）
+31. 去马赛克/超分重建（Real-ESRGAN / DeepMosaics / ESPCN，见下方专门说明）
 
 ### 分析工具
-31. 亮度曲线分析
-32. 颜色直方图
-33. 运动检测/热力图
-34. 视频信息查看
+32. 亮度曲线分析
+33. 颜色直方图
+34. 运动检测/热力图
+35. 视频信息查看
 
 ### 高级功能
-35. 流程组合（多种功能按顺序串联处理）
+36. 流程组合（多种功能按顺序串联处理）
 
 ### 工程化能力
 - **批处理队列** — 把多个文件或整个文件夹加进队列，套用同一套参数逐个处理
@@ -59,6 +60,7 @@
 - **输出编码** — H.264 / H.265 输出，CRF 或目标码率控制，可保留原音轨
 - **处理日志** — 界面内日志窗口 + 自动落盘到 `logs/`
 - **拖拽与快捷键** — 拖入文件即处理，常用操作都有快捷键
+- **Torch `.pth` 入口** — `Ctrl+T` 开子窗口，本机另起进程跑官方权重；以后其它 `.pth` 也走这里，不进主窗口 36 项流程
 
 ## 环境要求
 
@@ -79,7 +81,7 @@
 | `Pillow` | 建议 | 提升 GUI 图像预览体验；**水印和字幕要显示中文必须装它**（OpenCV 自带的 `putText` 画不出汉字，缺失时会退化成只能画 ASCII 并在日志里警告） |
 | `tkinterdnd2` | 可选 | 文件拖拽导入。缺失时程序照常启动，只是拖不进去（也可改装 `windnd`，仅 Windows） |
 | `FFmpeg` | 可选 | **不是 Python 包**，需单独安装并加入 `PATH`。H.264/H.265 编码、码率控制、保留音频、转 GIF 的最优路径都依赖它 |
-| `torch` | 一次性 | 仅在需要用 `export_deepmosaics_onnx.py` 重新导出 DeepMosaics 模型时才需要，日常运行不需要 |
+| `torch` | 可选 | **日常主程序不需要。** 两处才会用到：① `export_deepmosaics_onnx.py` 一次性导出；② `Ctrl+T` 的 Torch `.pth` 子进程。主窗口不 `import torch` |
 
 > `requirements.txt` 第一行的 `# -*- coding: utf-8 -*-` 不要删。pip 读 requirements 文件时如果既没有 BOM 也没有 coding 声明，会按系统默认编码解码（中文 Windows 上是 GBK），文件里的中文注释会让 `pip install -r` 直接报 `UnicodeDecodeError`。
 
@@ -110,17 +112,22 @@ python main.py
 
 ```
 VideoOpencv/
-├── main.py                       # 主程序（GUI + 处理引擎，单文件）
-├── requirements.txt              # Python 依赖清单
+├── main.py                       # 主程序（GUI + ONNX/OpenCV 引擎）。只做 .pth 入口，不 import torch
+├── vrt_window.py                 # Torch .pth 子窗口（选路径、起停本机子进程、收进度）
+├── infer_vrt.py                  # 本机推理子进程：只有这里才会 import torch / 加载 .pth
+├── setup_vrt.py                  # 下载官方 network_vrt.py + 008 降噪权重（不 import torch）
+├── third_party/VRT/              # 官方 VRT 网络（至少要有 models/network_vrt.py）
+├── requirements.txt              # 主程序依赖（不含 torch）
 ├── opencv_family.bat             # Windows 一键环境检测/安装/启动脚本
 ├── export_deepmosaics_onnx.py    # 把 DeepMosaics 的 PyTorch 权重导出为 ONNX（一次性工具）
-├── models/                       # DNN 模型存放目录（按需下载，见下方说明）
+├── models/                       # DNN 模型：ONNX 走 Ctrl+M；008 .pth 走 setup_vrt.py
 ├── charsets/                     # 字幕 OCR 的 CRNN 字符表（随代码库分发，勿删）
-├── luts/                         # 放自己的 .cube / LUT 贴图（可选，文件选择框默认从这里打开）
-├── presets/                      # 参数预设 JSON（首次保存预设时自动创建）
+├── luts/                         # 放自己的 .cube / LUT 贴图（可选）
+├── presets/                      # 主窗口参数预设；另有 torch_pth.json 记 .pth 窗口路径
 ├── logs/                         # 处理日志（自动创建，只保留最近 20 份）
 ├── dmp/                          # DeepMosaics 源码 + .pth 权重（用于导出 ONNX）
-└── venv/                         # 项目私有虚拟环境（由安装脚本创建）
+├── venv/                         # 项目私有环境（主程序 + 当前这套 CPU torch）
+└── venv_torch/                   # 可选：单独的 CUDA torch 环境，窗口里改 Python 路径即可
 ```
 
 ## 批处理 / 预设 / 日志 / 快捷键
@@ -180,6 +187,7 @@ VideoOpencv/
 | `Ctrl+F` | 定位到功能搜索框 |
 | `Ctrl+L` | 处理日志窗口 |
 | `Ctrl+M` | DNN 模型管理 |
+| `Ctrl+T` | Torch `.pth` 子窗口（默认 VRT 008 降噪） |
 | `F5` | 预览当前参数效果 |
 | `F9` / `Ctrl+Enter` | 开始处理 |
 | `Esc` | 取消处理 |
@@ -196,10 +204,11 @@ VideoOpencv/
 | 文件/目录 | 大小(约) | 说明 |
 |---|---|---|
 | `main.py` | <1MB | 主程序 |
+| `vrt_window.py` / `infer_vrt.py` / `setup_vrt.py` | <50KB | Torch `.pth` 入口三件套，不拷就打不开 `Ctrl+T` |
 | `requirements.txt` | <1KB | 依赖清单，安装脚本会优先用它装依赖 |
 | `opencv_family.bat` | <1MB | 一键环境检测/安装/启动脚本 |
 | `charsets/` | ~30KB | 字幕 OCR 的 CRNN 字符表，不拷过去 OCR 功能会显示为不可用 |
-| `models/` | ~700MB | 已下载好的 DNN 模型，拷过去就不用重新下载了（尤其是去马赛克模型，重新下载很麻烦） |
+| `models/` | ~800MB | 已下载的 ONNX + 若有 `008_VRT_videodenoising_DAVIS.pth`（约 102MB） |
 
 ### 按需拷贝（可选）
 
@@ -208,7 +217,8 @@ VideoOpencv/
 | `dmp/` | ~150MB | 只有以后还想用 `export_deepmosaics_onnx.py` 重新导出/更新 DeepMosaics 模型时才需要；`models/` 里已经有导出好的 `.onnx` 的话，日常使用不需要这个目录 |
 | `export_deepmosaics_onnx.py` | <1MB | 配合上面的 `dmp/` 一起用，同样只在需要重新导出时才需要 |
 | `luts/` | 看你放了多少 | 自己收集的 `.cube` / LUT 贴图 |
-| `presets/` | <1MB | 攒下来的参数预设 |
+| `presets/` | <1MB | 主窗口参数预设；`torch_pth.json` 是 .pth 窗口上次填的路径 |
+| `third_party/VRT/` | <1MB | 官方 `network_vrt.py`。没有的话新电脑上再跑一次 `python setup_vrt.py` 即可 |
 
 ### 不要拷贝
 
@@ -221,9 +231,10 @@ VideoOpencv/
 
 ### 新电脑上的步骤
 
-1. 拷贝"必须拷贝"（以及需要的话，"按需拷贝"）里的内容到新目录，保持相对路径结构不变（`models/`、`charsets/`、`dmp/` 要和 `main.py` 在同一层）
+1. 拷贝「必须拷贝」（以及需要的话，「按需拷贝」）里的内容到新目录，保持相对路径结构不变（`models/`、`charsets/`、`dmp/`、`third_party/` 要和 `main.py` 在同一层）
 2. 双击运行 `opencv_family.bat`，选择 `[4] 创建/重建私有环境` 或直接让它自动创建
-3. 环境检测通过后（`models/` 已经拷过去了，会直接显示已齐全），选 `[Y]` 启动即可，无需重新下载任何模型
+3. 环境检测通过后（`models/` 已经拷过去了，ONNX 会直接显示已齐全），选 `[Y]` 启动即可
+4. 若还要用 `Ctrl+T` 的 VRT：在新环境里按下方「Torch .pth 入口」装 `torch` / `einops` / `torchvision`（不要让 pip 擅自升级已有 torch），缺网络文件就跑 `python setup_vrt.py`
 
 ## 模型下载地址一览
 
@@ -242,6 +253,11 @@ VideoOpencv/
 | 人像分割 | `rvm_mobilenetv3_fp32.onnx` | ~15MB | <https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx> | ✅ |
 | 字幕 OCR（中文） | `text_recognition_CRNN_CN_2021nov.onnx` | ~69MB | <https://github.com/opencv/opencv_zoo/raw/main/models/text_recognition_crnn/text_recognition_CRNN_CN_2021nov.onnx> | ✅ |
 | 字幕 OCR（英文） | `text_recognition_CRNN_EN_2021sep.onnx` | ~32MB | <https://github.com/opencv/opencv_zoo/raw/main/models/text_recognition_crnn/text_recognition_CRNN_EN_2021sep.onnx> | ✅ |
+| 单帧降噪 | `dncnn_color.onnx` | ~2.6MB | <https://github.com/ikeno-web/npuscale/releases/download/v1.2/dncnn_color.onnx> | ✅ |
+| 单帧降噪 | `scunet_color_real_psnr.onnx` + `.onnx.data` | ~3.6MB + ~70MB | <https://huggingface.co/Heliosoph/scunet-onnx/resolve/main/scunet_color_real_psnr.onnx>（配套 `.onnx.data` 必须放同一目录） | ✅ |
+| 时域降噪 | `fastdvdnet_s15.onnx` / `s25` / `s50` | 各 ~9.5MB | <https://github.com/ikeno-web/npuscale/releases/download/v1.3/fastdvdnet_s25.onnx>（把文件名里的 `s25` 换成 `s15` / `s50`） | ✅ |
+| VRT 视频降噪 | `008_VRT_videodenoising_DAVIS.pth` | ~102MB | <https://github.com/JingyunLiang/VRT/releases/download/v0.0/008_VRT_videodenoising_DAVIS.pth>（窗口「补全官方文件」或 `python setup_vrt.py`） | ❌ 走 setup_vrt |
+| VRT 网络代码 | `third_party/VRT/models/network_vrt.py` | ~70KB | 官方 [JingyunLiang/VRT](https://github.com/JingyunLiang/VRT)，同样由 `setup_vrt.py` 拉取 | ❌ 走 setup_vrt |
 | 超分（轻量） | `ESPCN_x4.pb` | ~100KB | <https://raw.githubusercontent.com/fannymonori/TF-ESPCN/master/export/ESPCN_x4.pb> | ✅ |
 | 超分（Real-ESRGAN） | `realesrgan-x4plus.onnx` | ~64MB | <https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-x4plus.onnx>（备用：<https://huggingface.co/ai-forever/Real-ESRGAN/resolve/main/RealESRGAN_x4.onnx>） | ❌ 手动 |
 | 超分（Real-ESRGAN 动漫） | `realesrgan-x4plus-anime.onnx` | 数MB~20MB | <https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-x4plus-anime.onnx> | ❌ 手动 |
@@ -251,6 +267,94 @@ VideoOpencv/
 
 > - **人像分割**走 `onnxruntime`（不走 `cv2.dnn`，因为 RVM 有帧间循环状态），模型下好了但没装 `onnxruntime` 时会提示并回退。
 > - **字幕 OCR** 除了 `.onnx` 还需要 `charsets/` 里配套的字符表（`charset_3944_CN.txt` / `charset_36_EN.txt`），这两个文件随代码库分发，删掉的话模型会被判定为不可用。
+> - **SCUNet** 是「小图文件 + 外置权重」一对，两个都下齐才能用。
+> - **视频降噪**的 FastDVDnet / DnCNN / SCUNet 都走 `onnxruntime`（DirectML 可用）。VRT `.pth` 不走这条，见下方「Torch .pth 入口」。
+
+## 视频降噪功能说明
+
+主窗口「视频降噪」里分档选，全部本机、不经过 `.pth`：
+
+| 档 | 方法 | 依赖 | 适合 |
+|---|---|---|---|
+| **快档** | FFmpeg `hqdn3d` / `atadenoise` / `nlmeans` | 系统 `ffmpeg` | 轻颗粒、要速度、要保真 |
+| **质量档** | FastDVDnet（5 帧时域） | `fastdvdnet_s15/s25/s50.onnx` + onnxruntime | 实拍、手机夜景、传感器噪声 |
+| **质量档** | SCUNet / DnCNN（单帧） | 对应 ONNX | 动画、录屏、预览；或 FastDVD 缺失时的回退 |
+| **兜底** | OpenCV 非局部均值 | 无 | 模型和 FFmpeg 都没有时仍能用 |
+
+- **实拍 / 动画**开关：动画、定格、硬切不要走 FastDVDnet，时域融合会把线稿糊掉，这时会强制改用单帧模型。
+- **σ=15/25/50**：FastDVDnet 是三套分开训练的权重；快档里同一组数字只是用来加减滤镜力度。
+- **混合强度**：把降噪结果按比例混回原图，宁可欠一点也不要抹成塑料皮。
+- **色度多降一点**：FFmpeg 档对 U/V 下手更重，专门灭色斑。
+- 快档是整段丢给 FFmpeg 的滤镜图（`atadenoise` 这种必须看前后帧，不能逐帧在 Python 里跑）。质量档在工具里逐帧/滑窗推理，4K 会自动分块以免撑爆显存。
+- 缺模型或没装 `onnxruntime` 时会按 `FastDVDnet → DnCNN → OpenCV` 降级，原因写在处理日志（`Ctrl+L`）里。
+- 「锐化/模糊」里那条旧的降噪滑条还在，只是单帧 `fastNlMeans`，和新功能不是一回事。
+- 还要官方 Transformer 降噪（VRT 008）时，不要在这个列表里找，走下面的独立入口。
+
+## Torch .pth 入口（本机子进程）
+
+不能转 ONNX、必须 `torch.load(.pth)` 的模型，**一律走这里**，以后加别的 `.pth` 也是这个入口，不写进 `main.py` 的 36 项流程。
+
+全部在本机：子窗口和推理进程都是这台电脑上的 Python，不上传。所谓「子进程」只是再开一个本地解释器，避免主窗口 `import torch` 后变卡、变胖、崩了整棵 GUI。
+
+### 三层怎么拆
+
+| 层 | 文件 | 干什么 | 会不会 `import torch` |
+|---|---|---|---|
+| 入口 | `main.py` | 菜单 **工具 → VRT / Torch .pth 降噪**（`Ctrl+T`），或「视频降噪」参数页按钮 | 否，只懒加载窗口 |
+| 窗口 | `vrt_window.py` | 选 Python / 仓库 / `.pth`、开始、取消、进度 | 否 |
+| 推理 | `infer_vrt.py` | 读视频、加载权重、写结果；进度行以 `#VT` 开头回窗口 | **是**，只在这个进程里 |
+
+准备脚本 `setup_vrt.py` 只下载文件，也不 `import torch`。
+
+### 默认接好的方案：VRT 008 视频降噪
+
+当前入口默认就是官方 [JingyunLiang/VRT](https://github.com/JingyunLiang/VRT) 的 **008 DAVIS 视频降噪**（非盲，σ 0–50），本机已按这个对齐：
+
+| 项 | 默认位置 |
+|---|---|
+| 任务 | `vrt_denoise` |
+| 官方网络 | `third_party/VRT/models/network_vrt.py` |
+| 权重 | `models/008_VRT_videodenoising_DAVIS.pth`（约 102MB） |
+| Python | 项目 `venv`（窗口可改） |
+| 路径记忆 | `presets/torch_pth.json` |
+
+怎么用：主窗口打开视频 → `Ctrl+T` → 点「开始（子进程）」。缺网络或权重时点窗口里的「补全官方文件」，或：
+
+```bash
+python setup_vrt.py
+```
+
+参数：`σ` 对应官方 non-blind 噪声图；空间分块默认 256（`0` = 整帧，显存不够降到 128）；时间窗默认 12。CPU 上会很慢，适合短片；日常长片仍用主窗口 FastDVDnet。
+
+窗口里其它任务（同一套入口，换权重即可）：
+
+| 任务 | 说明 | 还要什么 |
+|---|---|---|
+| `vrt_denoise` | 默认。008 降噪 | 上面两样默认文件 |
+| `vrt_deblur` | VRT 去模糊 | 对应官方 `.pth`（005/006/007） |
+| `vrt_sr` | VRT 超分 ×4 | 对应官方 `.pth`（001 等） |
+| `jit` | TorchScript / 整模 `.pt` | 文件本身就是可跑的模块 |
+| `auto` | 按文件名猜上面几种 | — |
+
+不是任意 `.pth` 丢进去就能跑：权重必须配得上网络代码。VRT 用官方 `network_vrt.py`；`jit` 要整模或 TorchScript。其它论文结构以后仍走这个窗口，在 `infer_vrt.py` 里加一种任务即可。
+
+### 这个入口额外要装的包
+
+**不要**写进主程序的 `requirements.txt`，也不要用裸 `pip install timm`（新版会顺带把 `torch` 升到 2.13）。和现有 `torch 2.9.1+cpu` 对齐的装法：
+
+```bash
+venv\Scripts\python.exe -m pip install einops "timm==0.6.13" --no-deps
+venv\Scripts\python.exe -m pip install "torchvision==0.24.1" --index-url https://download.pytorch.org/whl/cpu --no-deps
+```
+
+| 包 | 实际用途 |
+|---|---|
+| `torch` | 加载 `.pth`、推理 |
+| `einops` | 官方 `network_vrt.py` 里的张量重排 |
+| `torchvision` | 官方网络的 `deform_conv2d`（硬依赖，版本要跟 torch 对齐） |
+| `timm` | 官方文件已把 DropPath 抄进去了，现成环境里装着即可，不是推理硬依赖 |
+
+有 NVIDIA 显卡想加速：另建 `venv_torch`，装 CUDA 版 `torch` + 配套 `torchvision`，再在子窗口把 Python 指过去。主程序继续用原来的 `venv`。
 
 ## 水印 / 调色 / 字幕功能说明
 
@@ -354,13 +458,15 @@ VideoOpencv/
 2. **CUDA**（装 `onnxruntime-gpu`，需配 NVIDIA 显卡 + CUDA/cuDNN）
 3. **CPU** — 兜底方案，速度明显慢于前两者（去马赛克/超分类任务尤其明显）
 
-程序界面和 `opencv_family.bat` 检测报告都会显示当前实际使用的后端，方便确认加速是否生效。
+程序界面和 `opencv_family.bat` 检测报告都会显示当前实际使用的后端，方便确认加速是否生效。`Ctrl+T` 的 VRT / `.pth` 不走 onnxruntime，加速看的是那个子进程里的 `torch`（CPU 或 CUDA）。
 
 ## 注意事项
 
-- 所有处理均在本地进行，不上传任何数据。
-- DNN 相关功能（人脸/物体检测、风格迁移、人像分割、文字检测/识别等）依赖对应模型文件，未下载时会在界面提示并可一键下载（除去马赛克和 Real-ESRGAN 模型外，见上文）。
+- 所有处理均在本地进行，不上传任何数据。`Ctrl+T` 的子进程也是本机 Python，不是远程。
+- 主程序日常不依赖 `torch`。不要在 `main.py` 里 `import torch`；`.pth` 只从 `infer_vrt.py` 加载。
+- DNN 相关功能（人脸/物体检测、风格迁移、人像分割、文字检测/识别、ONNX 降噪等）依赖对应模型文件，未下载时会在界面提示并可一键下载（除去马赛克、Real-ESRGAN、VRT `.pth` 外，见上文）。
 - 转 GIF、H.264/H.265 编码、码率控制、保留音频依赖系统已安装 `ffmpeg` 并加入 `PATH`。
 - 「文字检测 (EAST)」只框出文字位置不识别内容；要拿到文字请用「字幕 OCR 提取」。
 - 水印和字幕**要显示中文必须装 `Pillow`**，没装时只能画 ASCII 字符。
 - 「字幕 OCR 提取」的识别结果受原片字幕清晰度影响较大，**导出后请人工校对**。
+- 给 `timm` / `torchvision` 做 `pip install` 时看清是否会升级已有 `torch`，对不上版本官方 VRT 会装不进权重。

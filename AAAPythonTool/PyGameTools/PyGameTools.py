@@ -12,8 +12,10 @@ import shutil
 import subprocess
 import sys
 import threading
+import tarfile
 import urllib.request
 import zipfile
+from dataclasses import dataclass, field
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -56,6 +58,404 @@ PKG_IN_FOCUS_RE = re.compile(
 )
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# ---------------------------------------------------------------------------
+# Packer / engine fingerprint (signature only, no unpack)
+# ---------------------------------------------------------------------------
+# needles 对路径、文件名、清单里的 ASCII/UTF-16 字符串做包含匹配（小写）。
+# 能覆盖国内渠道包里大部分「有特色 so / Application」的商业加固；
+# 认不出：改过 so 名的私有壳、全新壳、只做混淆不做壳。
+DETECT_RULES: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
+    (
+        "加固",
+        "360加固",
+        ("libjiagu", "libjgdtc", "libjg.swak", "com.qihoo.util.stubapplication", "com.qihoo.util.stubapp"),
+        "classes.dex 多为壳，apktool 改到的通常不是原逻辑。",
+    ),
+    (
+        "加固",
+        "腾讯乐固",
+        ("libshella", "libshellx-", "libshell-super", "com.tencent.stubshell", "tencent_stub"),
+        "乐固壳。清单里的 Application 往往是 TxAppEntry。",
+    ),
+    (
+        "加固",
+        "梆梆 / SecNeo",
+        (
+            "libsecexe",
+            "libsecmain",
+            "libsecshell",
+            "libdexhelper",
+            "com.secneo.apkwrapper",
+            "com.secshell.secdata",
+        ),
+        "梆梆或 SecNeo 加固。",
+    ),
+    (
+        "加固",
+        "爱加密",
+        ("ijiami.dat", "ijiami.ajm", "libexecmain", "ijimaimain", "com.ijiami."),
+        "爱加密。不要单独凭 libexec.so 判断（太容易误报）。",
+    ),
+    (
+        "加固",
+        "阿里聚安全",
+        ("libmobisec", "aliprotect.dat", "com.ali.mobisecenhance"),
+        "阿里聚安全 / 移动安全。",
+    ),
+    (
+        "加固",
+        "百度加固",
+        ("libbaiduprotect", "baiduprotect", "com.baidu.protect"),
+        "百度加固。",
+    ),
+    (
+        "加固",
+        "娜迦",
+        ("libchaosvmp", "libddog.so", "libfdog.so", "libedog.so"),
+        "娜迦加固（含 VMP 特征库名）。",
+    ),
+    (
+        "加固",
+        "通付盾",
+        ("libegis.so", "libnsaferonly", "libnsafer"),
+        "通付盾（Payegis）。",
+    ),
+    (
+        "加固",
+        "网秦加固",
+        ("libnqshield",),
+        "网秦 nqshield。",
+    ),
+    (
+        "加固",
+        "网易易盾加固",
+        ("libnesec", "com.netease.nis.wrapper"),
+        "易盾应用加固（不是验证码 SDK）。",
+    ),
+    (
+        "加固",
+        "几维安全",
+        ("libkwscprotect", "libkwsc.so", "libkws.so"),
+        "几维安全加固。",
+    ),
+    (
+        "加固",
+        "APKProtect",
+        ("libapkprotect",),
+        "APKProtect。",
+    ),
+    (
+        "加固",
+        "中国移动加固",
+        ("libmogosec", "libmogosecurity"),
+        "中国移动 / 蘑菇加固。",
+    ),
+    (
+        "加固",
+        "珊瑚灵御",
+        ("libapssec",),
+        "珊瑚灵御。",
+    ),
+    (
+        "加固",
+        "顶像加固",
+        ("libdx-plaid", "libdxbase.so"),
+        "顶像安全。",
+    ),
+    (
+        "加固",
+        "华为加固",
+        ("libprotectclass", "com.huawei.protection"),
+        "华为应用加固。",
+    ),
+    (
+        "加固",
+        "小米加固",
+        ("libx3g.so",),
+        "小米加固常见 so 名。",
+    ),
+    (
+        "加固",
+        "瑞星加固",
+        ("librsprotect",),
+        "瑞星加固。",
+    ),
+    (
+        "加固",
+        "盛大加固",
+        ("libsndprotect",),
+        "盛大加固。",
+    ),
+    (
+        "加固",
+        "DexProtector",
+        ("dexprotector", "libdexprotector", "dp.dpc"),
+        "Licel DexProtector。",
+    ),
+    (
+        "加固",
+        "LIAPP",
+        ("liappstub", "liappini", "libliapp"),
+        "LIAPP。",
+    ),
+    (
+        "热更/渠道",
+        "乐变",
+        (
+            "com.excelliance",
+            "lbapplication",
+            "assets/lebian",
+            "liblebian",
+            "lebianflag",
+        ),
+        "热更/分包外壳，不是 DEX 加固。完整内容多在 Android/data/包名/files。",
+    ),
+    (
+        "反作弊",
+        "腾讯游戏安全 (TP)",
+        ("libtersafe", "libtp2.so", "libtprt.so"),
+        "反作弊/反外挂，一般不是 DEX 壳。",
+    ),
+    (
+        "风控SDK",
+        "字节 Metasec",
+        ("libmetasec",),
+        "风控/设备指纹，不是加固壳。",
+    ),
+    (
+        "引擎",
+        "Unity",
+        ("libunity.so", "libil2cpp.so", "assets/bin/data"),
+        "Unity 游戏。逻辑在 so / il2cpp，不是 Java 壳。",
+    ),
+    (
+        "引擎",
+        "Cocos",
+        ("libcocos2djs", "libcocos2dcpp", "libcocos2d.so"),
+        "Cocos 引擎。",
+    ),
+    (
+        "引擎",
+        "Unreal",
+        ("libue4.so", "libunreal.so"),
+        "Unreal Engine。",
+    ),
+    (
+        "引擎",
+        "Flutter",
+        ("libflutter.so", "libapp.so"),
+        "Flutter。libapp.so 需同时有 libflutter 才较稳，见命中文件。",
+    ),
+    (
+        "资源",
+        "YooAsset",
+        ("assets/yoo/", "assets/yoo\\"),
+        "YooAsset 分包。热更资源常在 files 目录，不是加固壳。",
+    ),
+    (
+        "资源",
+        "HybridCLR",
+        ("hybridclr", "libhybridclr"),
+        "Unity HybridCLR 热更代码。",
+    ),
+)
+
+UPX_MAGIC = b"UPX!"
+
+
+@dataclass
+class DetectHit:
+    kind: str
+    name: str
+    files: list[str] = field(default_factory=list)
+    hint: str = ""
+
+
+def _ascii_strings(data: bytes, min_len: int = 6) -> str:
+    chunks: list[str] = []
+    cur: list[str] = []
+    for b in data:
+        if 32 <= b < 127:
+            cur.append(chr(b))
+        else:
+            if len(cur) >= min_len:
+                chunks.append("".join(cur))
+            cur = []
+    if len(cur) >= min_len:
+        chunks.append("".join(cur))
+    return "\n".join(chunks)
+
+
+def _utf16le_strings(data: bytes, min_len: int = 6) -> str:
+    chunks: list[str] = []
+    cur: list[str] = []
+    i = 0
+    n = len(data) - 1
+    while i < n:
+        if data[i + 1] == 0 and 32 <= data[i] < 127:
+            cur.append(chr(data[i]))
+            i += 2
+            continue
+        if len(cur) >= min_len:
+            chunks.append("".join(cur))
+        cur = []
+        i += 1
+    if len(cur) >= min_len:
+        chunks.append("".join(cur))
+    return "\n".join(chunks)
+
+
+def _collect_zip_names(apk: Path) -> tuple[list[str], bytes, list[str]]:
+    names: list[str] = []
+    manifest = b""
+    upx_hits: list[str] = []
+    with zipfile.ZipFile(apk) as zf:
+        so_checked = 0
+        for info in zf.infolist():
+            name = info.filename.replace("\\", "/")
+            names.append(name)
+            low = name.lower()
+            if low.endswith("androidmanifest.xml") and not manifest:
+                try:
+                    manifest = zf.read(info)
+                except Exception:
+                    manifest = b""
+            if low.endswith(".so") and so_checked < 40:
+                so_checked += 1
+                try:
+                    with zf.open(info, "r") as fp:
+                        head = fp.read(256)
+                    if UPX_MAGIC in head:
+                        upx_hits.append(name)
+                except Exception:
+                    pass
+    return names, manifest, upx_hits
+
+
+def _collect_dir_names(root: Path) -> tuple[list[str], bytes]:
+    names: list[str] = []
+    manifest = b""
+    for sub in ("lib", "assets", "unknown", "original"):
+        folder = root / sub
+        if not folder.is_dir():
+            continue
+        for fp in folder.rglob("*"):
+            if not fp.is_file():
+                continue
+            names.append(fp.relative_to(root).as_posix())
+            if len(names) > 12000:
+                break
+        if len(names) > 12000:
+            break
+    man = root / "AndroidManifest.xml"
+    if man.is_file():
+        names.append("AndroidManifest.xml")
+        try:
+            manifest = man.read_bytes()
+        except Exception:
+            manifest = b""
+    return names, manifest
+
+
+def _needle_hits(needle: str, names: list[str], blob: str) -> list[str]:
+    n = needle.lower()
+    found: list[str] = []
+    for name in names:
+        if n in name.lower():
+            found.append(name)
+            if len(found) >= 6:
+                break
+    if not found and n in blob:
+        found.append("AndroidManifest / 字符串")
+    return found
+
+
+def detect_packers(apk: Path | None = None, decode_dir: Path | None = None) -> tuple[list[DetectHit], bool]:
+    names: list[str] = []
+    manifest = b""
+    upx_hits: list[str] = []
+    if apk and apk.is_file():
+        znames, manifest, upx_hits = _collect_zip_names(apk)
+        names.extend(znames)
+    if decode_dir and decode_dir.is_dir():
+        dnames, dman = _collect_dir_names(decode_dir)
+        names.extend(dnames)
+        if dman:
+            manifest = dman
+    blob = (
+        _ascii_strings(manifest).lower()
+        + "\n"
+        + _utf16le_strings(manifest).lower()
+    )
+    hits: list[DetectHit] = []
+    has_packer = False
+    flutter_libapp = False
+    flutter_engine = False
+    for kind, name, needles, hint in DETECT_RULES:
+        files: list[str] = []
+        for needle in needles:
+            files.extend(_needle_hits(needle, names, blob))
+        # 去重并保序
+        uniq: list[str] = []
+        seen: set[str] = set()
+        for f in files:
+            if f not in seen:
+                seen.add(f)
+                uniq.append(f)
+        if name == "Flutter":
+            flutter_engine = any("libflutter" in x.lower() for x in uniq)
+            flutter_libapp = any(x.lower().endswith("libapp.so") for x in uniq)
+            if flutter_libapp and not flutter_engine:
+                continue
+        if not uniq:
+            continue
+        if kind == "加固":
+            has_packer = True
+        hits.append(DetectHit(kind=kind, name=name, files=uniq[:8], hint=hint))
+    if upx_hits:
+        hits.append(
+            DetectHit(
+                kind="Native压缩",
+                name="UPX",
+                files=upx_hits[:8],
+                hint="so 被 UPX 压缩，不是 DEX 加固。",
+            )
+        )
+    kind_order = {"加固": 0, "热更/渠道": 1, "引擎": 2, "资源": 3, "反作弊": 4, "风控SDK": 5, "Native压缩": 6}
+    hits.sort(key=lambda h: (kind_order.get(h.kind, 9), h.name))
+    return hits, has_packer
+
+
+def format_detect_report(hits: list[DetectHit], has_packer: bool) -> str:
+    lines = ["---- 壳识别 ----"]
+    by_kind: dict[str, list[DetectHit]] = {}
+    for h in hits:
+        by_kind.setdefault(h.kind, []).append(h)
+    if "加固" not in by_kind:
+        lines.append("加固: 未发现常见商业加固（可能未加固，或私有壳/改名壳）")
+    for kind in ("加固", "热更/渠道", "引擎", "资源", "反作弊", "风控SDK", "Native压缩"):
+        items = by_kind.get(kind)
+        if not items:
+            continue
+        for h in items:
+            lines.append(f"{kind}: {h.name}")
+            show = h.files[:4]
+            extra = len(h.files) - len(show)
+            detail = ", ".join(show)
+            if extra > 0:
+                detail += f" 等 {extra} 个"
+            lines.append(f"  命中: {detail}")
+            if h.hint:
+                lines.append(f"  说明: {h.hint}")
+    lines.append(
+        "范围: 靠 so / 清单 / 资源路径识别国内常见商业壳，覆盖渠道包里的大多数；"
+        "认不出改名私有壳和全新壳。识别不是脱壳。"
+    )
+    if has_packer:
+        lines.append("建议: 加固包改 Java/smali 通常无效，优先用未加固测试包。")
+    lines.append("")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +872,7 @@ def _obb_dirs(package: str) -> list[str]:
 def pull_obb(adb: Path, device: str, package: str, dest: Path, log) -> bool:
     for remote in _obb_dirs(package):
         listing = adb_output(
-            adb, ["shell", "ls", remote], device, check=False
+            adb, ["shell", "ls", "-1", remote], device, check=False
         )
         low = listing.lower()
         if "no such file" in low or "not found" in low or not listing.strip():
@@ -489,12 +889,179 @@ def pull_obb(adb: Path, device: str, package: str, dest: Path, log) -> bool:
     return False
 
 
+def _data_roots(package: str) -> list[str]:
+    return [
+        f"/sdcard/Android/data/{package}",
+        f"/storage/emulated/0/Android/data/{package}",
+    ]
+
+
+DATA_ALWAYS = ("files", "cache")
+DATA_NAME_HINTS = (
+    "lebian",
+    "update",
+    "patch",
+    "download",
+    "hotfix",
+    "hotupdate",
+    "respatch",
+    "ota",
+)
+
+
+def _ls_remote(adb: Path, device: str, remote: str) -> tuple[str, list[str]]:
+    text = adb_output(adb, ["shell", "ls", "-1", remote], device, check=False)
+    low = text.lower()
+    if "permission denied" in low:
+        return "denied", []
+    if "no such file" in low or "not found" in low:
+        return "missing", []
+    names: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("ls:") or line in {".", ".."}:
+            continue
+        names.append(line)
+    return "ok", names
+
+
+def _want_data_subdir(name: str) -> bool:
+    low = name.lower()
+    if low in DATA_ALWAYS or low == "code_cache":
+        return True
+    return any(key in low for key in DATA_NAME_HINTS)
+
+
+def _pull_remote_into(adb: Path, device: str, remote: str, parent: Path, log) -> bool:
+    parent.mkdir(parents=True, exist_ok=True)
+    log(f"正在提取应用数据: {remote}")
+    try:
+        adb_run(adb, ["pull", remote, str(parent)], device, log)
+        return True
+    except RuntimeError as exc:
+        log(f"提取失败: {remote} ({exc})")
+        return False
+
+
+def pull_app_data(adb: Path, device: str, package: str, dest: Path, log) -> bool:
+    parent = dest / "appdata"
+    pulled = False
+    denied = False
+    for root in _data_roots(package):
+        status, names = _ls_remote(adb, device, root)
+        if status == "missing":
+            continue
+        if status == "denied":
+            denied = True
+            log(f"应用数据目录无权限（Android 11+ 常见）: {root}")
+            for sub in DATA_ALWAYS:
+                remote = f"{root}/{sub}"
+                sub_status, _ = _ls_remote(adb, device, remote)
+                if sub_status == "ok":
+                    pulled = _pull_remote_into(adb, device, remote, parent, log) or pulled
+            if pulled:
+                break
+            continue
+        targets = [n for n in names if _want_data_subdir(n)]
+        if not targets:
+            targets = [n for n in names if n in DATA_ALWAYS]
+        if not targets:
+            for sub in DATA_ALWAYS:
+                sub_status, _ = _ls_remote(adb, device, f"{root}/{sub}")
+                if sub_status == "ok":
+                    targets.append(sub)
+        if not targets:
+            log(f"{root} 下没有 files/cache/热更目录")
+            continue
+        for name in targets:
+            local_hit = parent / name
+            if local_hit.exists() and any(local_hit.rglob("*")):
+                continue
+            pulled = _pull_remote_into(adb, device, f"{root}/{name}", parent, log) or pulled
+        if pulled:
+            break
+    if _pull_private_via_runas(adb, device, package, dest, log):
+        pulled = True
+    if pulled:
+        log(f"应用数据已保存: {parent}")
+        return True
+    if denied:
+        log(
+            "未提取到应用数据。Android 11+ 常拦截 /Android/data；"
+            "可在手机文件管理器中授权后手动拷贝，或先装 DebugApk 再提。"
+        )
+    else:
+        log("未发现应用数据目录（可能尚未启动过游戏或未下载热更）")
+    return False
+
+
+def _pull_private_via_runas(
+    adb: Path, device: str, package: str, dest: Path, log
+) -> bool:
+    probe = adb_output(adb, ["shell", "run-as", package, "ls"], device, check=False)
+    low = probe.lower()
+    if "not debuggable" in low:
+        log("应用未开启 debuggable，跳过 /data/data 私有目录")
+        return False
+    if any(s in low for s in ("unknown package", "permission denied", "run-as:")):
+        return False
+    out_dir = dest / "appdata" / "private"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tar_path = dest / "appdata" / "_private.tar"
+    cmd = [str(adb)]
+    if device:
+        cmd.extend(["-s", device])
+    cmd.extend(
+        [
+            "exec-out",
+            "run-as",
+            package,
+            "sh",
+            "-c",
+            "tar c files cache 2>/dev/null || tar c files 2>/dev/null || tar c cache 2>/dev/null",
+        ]
+    )
+    log("正在通过 run-as 提取私有 files/cache（仅 debuggable）...")
+    try:
+        with open(tar_path, "wb") as out:
+            proc = subprocess.run(
+                cmd,
+                stdout=out,
+                stderr=subprocess.PIPE,
+                creationflags=CREATE_NO_WINDOW,
+            )
+    except Exception as exc:
+        tar_path.unlink(missing_ok=True)
+        log(f"run-as 提取失败: {exc}")
+        return False
+    if proc.returncode != 0 or not tar_path.is_file() or tar_path.stat().st_size < 64:
+        err = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+        tar_path.unlink(missing_ok=True)
+        if err:
+            log(f"run-as 提取失败: {err}")
+        return False
+    try:
+        with tarfile.open(tar_path, "r") as tf:
+            try:
+                tf.extractall(out_dir, filter="data")
+            except TypeError:
+                tf.extractall(out_dir)
+    except tarfile.TarError as exc:
+        log(f"私有目录压缩包无法解开: {exc}")
+        tar_path.unlink(missing_ok=True)
+        return False
+    tar_path.unlink(missing_ok=True)
+    log(f"已提取私有目录: {out_dir}")
+    return True
+
+
 def pull_installed_apk(
     adb: Path,
     device: str,
     package: str,
     merge: bool,
     with_obb: bool,
+    with_data: bool,
     log,
 ) -> Path:
     paths = get_apk_paths(adb, device, package)
@@ -517,6 +1084,8 @@ def pull_installed_apk(
         shutil.copy2(pulled[0], result)
     if with_obb:
         pull_obb(adb, device, package, dest, log)
+    if with_data:
+        pull_app_data(adb, device, package, dest, log)
     if result.is_file():
         log(f"提包完成: {result}")
         return result
@@ -524,6 +1093,366 @@ def pull_installed_apk(
         log(f"提包完成（未合并）: {dest}")
         return pulled[0]
     raise RuntimeError("没有提取到任何 APK")
+
+
+# ---------------------------------------------------------------------------
+# Merge appdata (files / hot-update) into decompiled APK
+# 乐变: Android/data/<pkg>/files  <->  apk 内 assets/
+# ---------------------------------------------------------------------------
+MERGE_SKIP_DIRS = {
+    "cache",
+    "code_cache",
+    "obb",
+    ".thumbnails",
+    "lost+found",
+    "__macosx",
+}
+YOO_CACHE_DIR_NAMES = frozenset(
+    {"cachebundlefiles", "cacherawfiles", "cachefiles"}
+)
+# 普通 ZIP/APK 中央目录偏移是 32 位，超过后签名器会报 offset 4294967295
+ZIP32_MAX_BYTES = 4 * 1024 * 1024 * 1024 - 1
+# Windows zipalign 用 32 位 signed long 做 ftell，超过 2GB 会 could not execute zipalign
+ZIPALIGN_WIN_MAX_BYTES = 2 * 1024 * 1024 * 1024
+MERGE_SKIP_SUFFIX = {
+    ".tmp",
+    ".temp",
+    ".lock",
+    ".crdownload",
+    ".download",
+    ".apk",
+    ".dex",
+    ".odex",
+    ".vdex",
+    ".jar",
+    ".so.bak",
+}
+ABI_DIRS = {"arm64-v8a", "armeabi-v7a", "armeabi", "x86", "x86_64"}
+
+
+def guess_appdata_dir(apk: Path | None, package: str = "") -> Path | None:
+    candidates: list[Path] = []
+    if apk:
+        candidates.append(apk.parent / "appdata")
+        candidates.append(apk.parent)
+        if apk.parent.name != "pulled":
+            candidates.append(PULL_DIR / apk.parent.name / "appdata")
+        candidates.append(PULL_DIR / apk.stem / "appdata")
+    if package:
+        candidates.append(PULL_DIR / package / "appdata")
+    seen: set[Path] = set()
+    for raw in candidates:
+        try:
+            p = raw.resolve()
+        except OSError:
+            p = raw
+        if p in seen:
+            continue
+        seen.add(p)
+        if _looks_like_appdata(p):
+            return p
+    return None
+
+
+def _looks_like_appdata(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    if path.name.lower() == "appdata" and any(path.iterdir()):
+        return True
+    names = {c.name.lower() for c in path.iterdir() if c.is_dir()}
+    return bool(names & {"files", "cache", "private"})
+
+
+def _is_tiny_stub(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size <= 8
+    except OSError:
+        return False
+
+
+def _unwrap_files_root(src: Path) -> Path:
+    cur = src
+    for _ in range(6):
+        if not cur.is_dir():
+            return src
+        if (cur / "bin" / "Data").exists() or (cur / "yoo").is_dir():
+            return cur
+        if (cur / "assets" / "bin").exists() or (cur / "assets" / "yoo").is_dir():
+            return cur / "assets"
+        if (cur / "assets").is_dir() and any((cur / "assets").iterdir()):
+            kids = [p.name.lower() for p in cur.iterdir() if p.is_dir()]
+            if kids == ["assets"] or set(kids) <= {"assets", "cache"}:
+                return cur / "assets"
+        android = cur / "Android" / "data"
+        if android.is_dir():
+            pkgs = [p for p in android.iterdir() if p.is_dir()]
+            if len(pkgs) == 1 and (pkgs[0] / "files").is_dir():
+                cur = pkgs[0] / "files"
+                continue
+        children = [p for p in cur.iterdir() if p.is_dir() and p.name.lower() not in MERGE_SKIP_DIRS]
+        if len(children) == 1 and children[0].name.lower() in {"files", "0"}:
+            cur = children[0]
+            continue
+        break
+    return cur
+
+
+def _iter_merge_sources(appdata: Path) -> list[tuple[str, Path]]:
+    found: list[tuple[str, Path]] = []
+    if not appdata.is_dir():
+        return found
+    # 若用户直接选了 files 目录
+    if appdata.name.lower() == "files" or (appdata / "bin" / "Data").exists() or (appdata / "yoo").is_dir():
+        found.append(("files", _unwrap_files_root(appdata)))
+        return found
+    for name in ("files",):
+        p = appdata / name
+        if p.is_dir():
+            found.append((name, _unwrap_files_root(p)))
+    private_files = appdata / "private" / "files"
+    if private_files.is_dir():
+        found.append(("private/files", _unwrap_files_root(private_files)))
+    if not found:
+        # 热更目录直接当资源根（排除 cache）
+        extras = [
+            p
+            for p in appdata.iterdir()
+            if p.is_dir() and p.name.lower() not in MERGE_SKIP_DIRS | {"private"}
+        ]
+        for p in extras:
+            found.append((p.name, _unwrap_files_root(p)))
+    return found
+
+
+def _should_skip_file(path: Path, skip_yoo_cache: bool = False) -> bool:
+    if path.suffix.lower() in MERGE_SKIP_SUFFIX:
+        return True
+    parts = {x.lower() for x in path.parts}
+    if parts & MERGE_SKIP_DIRS:
+        return True
+    if skip_yoo_cache and parts & YOO_CACHE_DIR_NAMES:
+        return True
+    return False
+
+
+def _is_yoo_cache_path(path: Path) -> bool:
+    return bool({x.lower() for x in path.parts} & YOO_CACHE_DIR_NAMES)
+
+
+def _dir_size_bytes(root: Path) -> int:
+    total = 0
+    for f in root.rglob("*"):
+        if f.is_file():
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def slim_yooasset_cache(decode_dir: Path, log) -> dict[str, int]:
+    """从反编译工程移出 YooAsset 缓存目录，避免回编译 APK 超过 4GB。"""
+    stats = {"dirs": 0, "bytes": 0}
+    assets = decode_dir / "assets"
+    if not assets.is_dir():
+        return stats
+    targets: list[Path] = []
+    for path in assets.rglob("*"):
+        if path.is_dir() and path.name.lower() in YOO_CACHE_DIR_NAMES:
+            targets.append(path)
+    targets.sort(key=lambda p: len(p.parts))
+    kept: list[Path] = []
+    for path in targets:
+        if any(path == k or k in path.parents for k in kept):
+            continue
+        kept.append(path)
+    for path in kept:
+        size = _dir_size_bytes(path)
+        rel = path.relative_to(decode_dir)
+        shutil.rmtree(path, ignore_errors=True)
+        if path.exists():
+            log(f"未能删除 YooAsset 缓存: {rel}")
+            continue
+        stats["dirs"] += 1
+        stats["bytes"] += size
+        log(
+            f"已移出 YooAsset 缓存 {rel}（{size / (1024 ** 3):.2f} GB）。"
+            "完整资源请留在手机 Android/data/<包名>/files/yoo/，不要打进 APK。"
+        )
+    return stats
+
+
+def assert_apk_within_zip32(path: Path) -> None:
+    size = path.stat().st_size
+    if size <= ZIP32_MAX_BYTES:
+        return
+    raise RuntimeError(
+        f"未签名 APK 已 {size / (1024 ** 3):.2f} GB，超过 ZIP/APK 4GB 上限，无法签名。"
+        "请先移出 assets/yoo/*/CacheBundleFiles 和 CacheRawFiles 后再回编译。"
+    )
+
+
+def _merge_dest(decode_dir: Path, rel: Path) -> Path:
+    parts = rel.parts
+    if parts and parts[0].lower() == "lib" and len(parts) >= 3 and parts[1] in ABI_DIRS:
+        return decode_dir.joinpath(*parts)
+    if parts and parts[0].lower() == "assets":
+        return decode_dir.joinpath(*parts)
+    return decode_dir / "assets" / rel
+
+
+def merge_appdata_into_decode(
+    appdata: Path,
+    decode_dir: Path,
+    log,
+    skip_cache_if_over_4g: bool = True,
+) -> dict[str, int]:
+    if not decode_dir.is_dir() or not (decode_dir / "AndroidManifest.xml").exists():
+        raise RuntimeError("请先反编译 APK，再合并应用数据")
+    if not appdata.is_dir():
+        raise RuntimeError(f"应用数据目录不存在: {appdata}")
+    sources = _iter_merge_sources(appdata)
+    if not sources:
+        raise RuntimeError(
+            f"{appdata} 下没有 files / 热更资源。请先在提包页勾选「应用数据」并提取。"
+        )
+    planned: list[tuple[Path, Path, bool, int]] = []
+    cache_bytes = 0
+    other_new_bytes = 0
+    stats = {
+        "copied": 0,
+        "overwritten": 0,
+        "skipped": 0,
+        "stub_skip": 0,
+        "cache_skip": 0,
+        "cache_skip_bytes": 0,
+        "skipped_cache": 0,
+    }
+    for label, root in sources:
+        log(f"合并来源 [{label}]: {root}")
+        for src in root.rglob("*"):
+            if not src.is_file() or _should_skip_file(src):
+                if src.is_file():
+                    stats["skipped"] += 1
+                continue
+            rel = src.relative_to(root)
+            dest = _merge_dest(decode_dir, rel)
+            try:
+                size = src.stat().st_size
+            except OSError:
+                size = 0
+            is_cache = _is_yoo_cache_path(src)
+            if is_cache:
+                cache_bytes += size
+            elif not dest.exists() or _is_tiny_stub(dest):
+                other_new_bytes += size
+            planned.append((src, dest, is_cache, size))
+
+    decode_size = _dir_size_bytes(decode_dir)
+    projected = decode_size + other_new_bytes + cache_bytes
+    skip_cache = bool(
+        skip_cache_if_over_4g and cache_bytes > 0 and projected > ZIP32_MAX_BYTES
+    )
+    log(
+        f"体积预估: 工程现有 {decode_size / (1024 ** 3):.2f} GB，"
+        f"待合并 {other_new_bytes / (1024 ** 3):.2f} GB，"
+        f"YooAsset 缓存 {cache_bytes / (1024 ** 3):.2f} GB，"
+        f"合计约 {projected / (1024 ** 3):.2f} GB（APK 上限 4GB）"
+    )
+    if skip_cache:
+        log(
+            "已勾选「超过 4GB 时跳过缓存」：本次不把 CacheBundleFiles / CacheRawFiles 打进 APK。"
+            "装机后请点「推送缓存到手机」。"
+        )
+    elif projected > ZIP32_MAX_BYTES:
+        log(
+            "预估将超过 4GB。未勾选取舍时仍会全部合并，但回编译大概率无法签名。"
+        )
+
+    for src, dest, is_cache, size in planned:
+        if is_cache and skip_cache:
+            stats["cache_skip"] += 1
+            stats["cache_skip_bytes"] += size
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            if _is_tiny_stub(src) and not _is_tiny_stub(dest):
+                stats["stub_skip"] += 1
+                continue
+            shutil.copy2(src, dest)
+            stats["overwritten"] += 1
+        else:
+            shutil.copy2(src, dest)
+            stats["copied"] += 1
+    stats["skipped_cache"] = 1 if skip_cache else 0
+    log(
+        f"合并完成: 新增 {stats['copied']}，覆盖 {stats['overwritten']}，"
+        f"跳过占位 {stats['stub_skip']}，跳过缓存 {stats['cache_skip']}，"
+        f"跳过其它 {stats['skipped']}"
+    )
+    log("已写入反编译工程的 assets/（以及 files 里的 lib/<abi>/*.so）。请再点回编译。")
+    return stats
+
+
+def find_local_yoo_dir(appdata: Path) -> Path | None:
+    if not appdata.is_dir():
+        return None
+    for cand in (
+        appdata / "files" / "yoo",
+        appdata / "yoo",
+        appdata / "private" / "files" / "yoo",
+    ):
+        if cand.is_dir():
+            return cand
+    for _label, root in _iter_merge_sources(appdata):
+        if (root / "yoo").is_dir():
+            return root / "yoo"
+        if root.name.lower() == "yoo":
+            return root
+    return None
+
+
+def iter_local_yoo_cache_dirs(yoo: Path) -> list[tuple[Path, str]]:
+    found: list[tuple[Path, str]] = []
+    for path in yoo.rglob("*"):
+        if path.is_dir() and path.name.lower() in YOO_CACHE_DIR_NAMES:
+            found.append((path, path.relative_to(yoo).as_posix()))
+    found.sort(key=lambda item: item[1].count("/"))
+    return found
+
+
+def push_yoo_cache_to_device(
+    adb: Path,
+    device: str,
+    package: str,
+    appdata: Path,
+    log,
+) -> Path:
+    if not package:
+        raise RuntimeError("缺少包名，无法确定手机上的 Android/data/<包名>/files/yoo")
+    yoo = find_local_yoo_dir(appdata)
+    if yoo is None:
+        raise RuntimeError(
+            f"{appdata} 下没有 yoo 目录。请先在提包页勾选「应用数据」并提取。"
+        )
+    caches = iter_local_yoo_cache_dirs(yoo)
+    if not caches:
+        raise RuntimeError(f"{yoo} 下没有 CacheBundleFiles / CacheRawFiles")
+    remote_root = f"/sdcard/Android/data/{package}/files/yoo"
+    total = sum(_dir_size_bytes(p) for p, _rel in caches)
+    log(
+        f"将推送 {len(caches)} 个缓存目录，约 {total / (1024 ** 3):.2f} GB → {remote_root}"
+    )
+    adb_run(adb, ["shell", "mkdir", "-p", remote_root], device, log)
+    for local, rel in caches:
+        remote = f"{remote_root}/{rel}"
+        parent = remote.rsplit("/", 1)[0]
+        adb_run(adb, ["shell", "mkdir", "-p", parent], device, log)
+        cache_gb = _dir_size_bytes(local) / (1024 ** 3)
+        log(f"正在推送 {rel}（{cache_gb:.2f} GB）")
+        adb_run(adb, ["push", str(local), remote], device, log)
+    log(f"缓存已推送到手机: {remote_root}")
+    return Path(remote_root)
 
 
 # ---------------------------------------------------------------------------
@@ -786,11 +1715,8 @@ def _patch_unity_force_gles_smali(decode_dir: Path, log) -> int:
     return count
 
 
-def _patch_boot_config_no_vulkan(decode_dir: Path, log) -> None:
-    boot = decode_dir / "assets" / "bin" / "Data" / "boot.config"
-    if not boot.exists():
-        return
-    lines = _read_text(boot).splitlines()
+def apply_boot_vulkan_keys(text: str) -> str:
+    lines = text.splitlines()
     keys_seen: set[str] = set()
     out: list[str] = []
     for line in lines:
@@ -804,9 +1730,177 @@ def _patch_boot_config_no_vulkan(decode_dir: Path, log) -> None:
     for key, val in BOOT_VULKAN_KEYS.items():
         if key not in keys_seen:
             out.append(f"{key}={val}")
-    text = "\n".join(out).rstrip() + "\n"
-    _write_text(boot, text)
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _patch_boot_config_no_vulkan(decode_dir: Path, log) -> None:
+    boot = decode_dir / "assets" / "bin" / "Data" / "boot.config"
+    if not boot.exists():
+        return
+    _write_text(boot, apply_boot_vulkan_keys(_read_text(boot)))
     log("已写入 boot.config：关闭 Vulkan，强制 GLES")
+
+
+def ensure_gles_boot_config(decode_dir: Path | None, log) -> Path:
+    """得到带 GLES 开关的 boot.config；工程里有则就地更新，没有则写临时文件。"""
+    if decode_dir:
+        boot = decode_dir / "assets" / "bin" / "Data" / "boot.config"
+        if boot.is_file():
+            _write_text(boot, apply_boot_vulkan_keys(_read_text(boot)))
+            log(f"已更新工程 boot.config: {boot.relative_to(decode_dir)}")
+            return boot
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = OUTPUT_DIR / "_gles_boot.config"
+    _write_text(tmp, apply_boot_vulkan_keys(""))
+    log("工程没有 boot.config，将只推送 GLES 开关到手机")
+    return tmp
+
+
+def push_gles_config_to_device(
+    adb: Path,
+    device: str,
+    package: str,
+    decode_dir: Path | None,
+    log,
+) -> str:
+    if not package:
+        raise RuntimeError("缺少包名，无法确定手机上的 Android/data/<包名>/files")
+    local = ensure_gles_boot_config(decode_dir, log)
+    remote_dir = f"/sdcard/Android/data/{package}/files/bin/Data"
+    remote = f"{remote_dir}/boot.config"
+    log(f"将推送 GLES 配置 → {remote}")
+    adb_run(adb, ["shell", "mkdir", "-p", remote_dir], device, log)
+    adb_run(adb, ["push", str(local), remote], device, log)
+    probe = adb_output(adb, ["shell", "run-as", package, "ls"], device, check=False)
+    low = probe.lower()
+    if "not debuggable" in low or "unknown package" in low or "run-as:" in low:
+        log("应用不可 run-as，跳过私有目录清理（需已装 DebugApk）")
+    else:
+        adb_output(
+            adb,
+            [
+                "shell",
+                "run-as",
+                package,
+                "sh",
+                "-c",
+                "rm -f shared_prefs/*ulkan* shared_prefs/*raphics* 2>/dev/null; true",
+            ],
+            device,
+            check=False,
+        )
+        log("已尝试清理 Unity / Vulkan SharedPreferences（run-as）")
+    adb_run(adb, ["shell", "am", "force-stop", package], device, log)
+    log(f"已强制停止 {package}。请从 RenderDoc 重新启动，不要只点桌面图标。")
+    return remote
+
+
+LOGIN_PREF_NEEDLES = (
+    "login",
+    "logon",
+    "logout",
+    "prelogin",
+    "tuyoo",
+    "tysdk",
+    "ty_sdk",
+    "gamesdk",
+    "token",
+    "account",
+    "userid",
+    "userinfo",
+    "username",
+    "session",
+    "passport",
+    "oauth",
+    "openid",
+    "guest",
+    "switchaccount",
+    "switch_account",
+)
+LOGIN_KEEP_NAMES = frozenset({"yoo", "bin", "il2cpp", "lebian", "cache", "code_cache"})
+
+
+def _is_login_cache_name(name: str) -> bool:
+    low = name.lower().strip()
+    if not low or low in LOGIN_KEEP_NAMES or "yoo" in low:
+        return False
+    return any(needle in low for needle in LOGIN_PREF_NEEDLES)
+
+
+def _run_as_usable(adb: Path, device: str, package: str) -> tuple[bool, str]:
+    text = adb_output(adb, ["shell", "run-as", package, "ls"], device, check=False)
+    low = text.lower()
+    if "not debuggable" in low:
+        return False, "应用未开启 debuggable，请先安装 DebugApk"
+    if "unknown package" in low or "permission denied" in low or "run-as:" in low:
+        return False, (text.strip() or "run-as 不可用")
+    return True, text
+
+
+def _run_as_ls(adb: Path, device: str, package: str, remote_dir: str) -> list[str]:
+    text = adb_output(
+        adb, ["shell", "run-as", package, "ls", "-1", remote_dir], device, check=False
+    )
+    low = text.lower()
+    if "no such file" in low or "not found" in low or "not a directory" in low:
+        return []
+    names: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("ls:") or line in {".", ".."}:
+            continue
+        names.append(line)
+    return names
+
+
+def clear_login_cache_on_device(adb: Path, device: str, package: str, log) -> str:
+    if not package:
+        raise RuntimeError("缺少包名")
+    ok, reason = _run_as_usable(adb, device, package)
+    if not ok:
+        raise RuntimeError(reason)
+    adb_run(adb, ["shell", "am", "force-stop", package], device, log)
+    prefs = _run_as_ls(adb, device, package, "shared_prefs")
+    root_files = _run_as_ls(adb, device, package, "files")
+    pref_hits = [n for n in prefs if _is_login_cache_name(n)]
+    file_hits = [n for n in root_files if _is_login_cache_name(n)]
+    log(f"shared_prefs 共 {len(prefs)} 个，登录相关 {len(pref_hits)} 个")
+    if root_files:
+        log(f"files 根目录共 {len(root_files)} 项，登录相关 {len(file_hits)} 个（不会进入 yoo/）")
+    removed: list[str] = []
+    for name in pref_hits:
+        adb_output(
+            adb,
+            ["shell", "run-as", package, "rm", "-f", f"shared_prefs/{name}"],
+            device,
+            check=False,
+        )
+        removed.append(f"shared_prefs/{name}")
+        log(f"已删除 {name}")
+    for name in file_hits:
+        adb_output(
+            adb,
+            ["shell", "run-as", package, "rm", "-f", f"files/{name}"],
+            device,
+            check=False,
+        )
+        removed.append(f"files/{name}")
+        log(f"已删除 files/{name}（仅根目录文件，不是目录）")
+    yoo_priv = _run_as_ls(adb, device, package, "files/yoo")
+    yoo_ext = adb_output(
+        adb,
+        ["shell", "ls", "-1", f"/sdcard/Android/data/{package}/files/yoo"],
+        device,
+        check=False,
+    )
+    if yoo_priv:
+        log(f"私有 files/yoo 仍在（{len(yoo_priv)} 项），未删除资源缓存")
+    if "no such file" not in yoo_ext.lower() and yoo_ext.strip():
+        log("外部 Android/data/.../files/yoo 仍在，未删除资源缓存")
+    if not removed:
+        log("没有匹配到登录缓存文件（可能本来就没有，或命名不含常见关键字）")
+        return f"{package}：未找到登录缓存，yoo 未动"
+    return f"{package}：已删 {len(removed)} 个登录文件，yoo 未动"
 
 
 def _patch_manifest_no_vulkan(manifest: Path, log) -> None:
@@ -868,6 +1962,7 @@ def apply_app_info(
     debug: bool,
     log,
     disable_vulkan: bool = False,
+    disable_lebian_hot: bool = False,
 ) -> None:
     manifest = decode_dir / "AndroidManifest.xml"
     if not manifest.exists():
@@ -884,6 +1979,74 @@ def apply_app_info(
         set_debuggable(manifest, log)
     if disable_vulkan:
         force_disable_vulkan(decode_dir, log)
+    if disable_lebian_hot:
+        disable_lebian_hotupdate(decode_dir, log)
+
+
+LEBIAN_HOTUPDATE_OFF = {
+    "use_regeng": "false",
+    "auto_check_newver_onstart": "false",
+    "use_streaming": "false",
+    "streaming_auto_start_bwbx": "false",
+    "download_after_quit": "false",
+}
+
+
+def _set_lebian_setting(text: str, key: str, value: str) -> tuple[str, bool]:
+    pat_kv = re.compile(
+        rf'(<setting\b[^>]*\bkey="{re.escape(key)}"[^>]*\bvalue=")[^"]*"',
+        re.I,
+    )
+    # 不能用 rf'...\"'：raw 字符串会把反斜杠写进 XML，变成 value="false\"
+    new, n = pat_kv.subn(r"\g<1>" + value + '"', text, count=1)
+    if n:
+        return new, True
+    pat_vk = re.compile(
+        rf'(<setting\b[^>]*\bvalue=")[^"]*("[^>]*\bkey="{re.escape(key)}")',
+        re.I,
+    )
+    new, n = pat_vk.subn(rf"\g<1>{value}\2", text, count=1)
+    if n:
+        return new, True
+    if re.search(r"</settings\s*>", text, re.I):
+        insert = f'    <setting key="{key}" value="{value}"/>\n'
+        text = re.sub(r"</settings\s*>", insert + "</settings>", text, count=1, flags=re.I)
+        return text, True
+    return text, False
+
+
+def disable_lebian_hotupdate(decode_dir: Path, log) -> None:
+    files: list[Path] = []
+    seen: set[Path] = set()
+    preferred = decode_dir / "assets" / "lebian" / "globalSettings.xml"
+    for path in [preferred, *decode_dir.glob("assets/**/globalSettings.xml")]:
+        if not path.is_file():
+            continue
+        key = path.resolve()
+        if key in seen:
+            continue
+        seen.add(key)
+        files.append(path)
+    if not files:
+        log("未找到乐变 globalSettings.xml，跳过关闭热更（可能不是乐变包）")
+        return
+    for path in files:
+        text = _read_text(path)
+        # 旧版本写入过 value="false\"，先清掉再改开关
+        text = re.sub(r'(value=")([^"\\]*)\\"', r'\1\2"', text)
+        changed: list[str] = []
+        for key, val in LEBIAN_HOTUPDATE_OFF.items():
+            new_text, ok = _set_lebian_setting(text, key, val)
+            if ok and new_text != text:
+                changed.append(f"{key}={val}")
+            text = new_text
+        if changed:
+            _write_text(path, text)
+            log(f"已关闭乐变热更: {path.relative_to(decode_dir)}（{'，'.join(changed)}）")
+        else:
+            _write_text(path, text)
+            log(f"乐变热更开关已是目标值: {path.relative_to(decode_dir)}")
+    log("未改 use_lebian。装机后请清掉 Android/data/<包名>，或换新包名，避免本地 files 盖过包内资源。")
 
 
 # ---------------------------------------------------------------------------
@@ -895,6 +2058,7 @@ class Workflow:
         self.java: Path | None = None
         self.apk_path: Path | None = None
         self.decode_dir: Path | None = None
+        self.appdata_dir: Path | None = None
 
     def ensure(self) -> Path:
         if self.java is None or not self.java.is_file():
@@ -904,6 +2068,8 @@ class Workflow:
     def set_apk(self, path: Path) -> None:
         self.apk_path = path
         self.decode_dir = WORK_DIR / path.stem
+        guessed = guess_appdata_dir(path)
+        self.appdata_dir = guessed if guessed else self.appdata_dir
 
     def decompile(self) -> None:
         java = self.ensure()
@@ -927,11 +2093,26 @@ class Workflow:
         ]
         run_cmd(cmd, self.log)
         self.log(f"反编译完成: {self.decode_dir}")
+        try:
+            hits, packed = detect_packers(self.apk_path, self.decode_dir)
+            self.log(format_detect_report(hits, packed).rstrip())
+        except Exception as exc:
+            self.log(f"壳识别失败: {exc}")
 
     def build_and_sign(self, app_info: dict, debug: bool, sign_mode: str) -> Path:
         java = self.ensure()
         if not self.decode_dir or not self.decode_dir.exists():
             raise RuntimeError("请先反编译 APK")
+        if app_info.get("skip_cache_if_over_4g", True):
+            decode_size = _dir_size_bytes(self.decode_dir)
+            if decode_size > ZIP32_MAX_BYTES:
+                slim = slim_yooasset_cache(self.decode_dir, self.log)
+                if slim["dirs"]:
+                    self.log(
+                        f"工程 {decode_size / (1024 ** 3):.2f} GB，超过 4GB，"
+                        f"已按选项移出 {slim['dirs']} 个 YooAsset 缓存目录"
+                        f"（{slim['bytes'] / (1024 ** 3):.2f} GB）。"
+                    )
         apply_app_info(
             self.decode_dir,
             app_info.get("game_id", ""),
@@ -941,6 +2122,7 @@ class Workflow:
             debug=debug,
             log=self.log,
             disable_vulkan=bool(app_info.get("disable_vulkan")),
+            disable_lebian_hot=bool(app_info.get("disable_lebian_hot")),
         )
         stem = self.apk_path.stem if self.apk_path else self.decode_dir.name
         suffix = "_debug" if debug else ""
@@ -960,6 +2142,7 @@ class Workflow:
             str(unsigned),
         ]
         run_cmd(cmd, self.log)
+        assert_apk_within_zip32(unsigned)
         signed = self._sign(java, unsigned, debug=debug or sign_mode == "测试签名")
         if unsigned.exists() and unsigned != signed:
             unsigned.unlink(missing_ok=True)
@@ -971,6 +2154,46 @@ class Workflow:
         if out_dir.exists():
             shutil.rmtree(out_dir, ignore_errors=True)
         out_dir.mkdir(parents=True, exist_ok=True)
+        size = unsigned.stat().st_size
+        skip_align = sys.platform == "win32" and size >= ZIPALIGN_WIN_MAX_BYTES
+        if skip_align:
+            self.log(
+                f"未签名 APK {size / (1024 ** 3):.2f} GB，超过 Windows zipalign 的 2GB 限制，"
+                "将跳过对齐后直接签名。侧载/调试可装；上架商店才必须对齐。"
+            )
+        cmd = self._signer_cmd(java, unsigned, out_dir, debug, skip_align=skip_align)
+        try:
+            run_cmd(cmd, self.log)
+        except RuntimeError:
+            if skip_align:
+                raise
+            self.log("zipalign 失败，改跳过对齐后重试签名（侧载/调试通常仍可装）")
+            if out_dir.exists():
+                shutil.rmtree(out_dir, ignore_errors=True)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            run_cmd(
+                self._signer_cmd(java, unsigned, out_dir, debug, skip_align=True),
+                self.log,
+            )
+        signed_files = list(out_dir.glob("*.apk"))
+        if not signed_files:
+            raise RuntimeError("签名后未找到 APK")
+        stem = unsigned.stem.replace("_unsigned", "")
+        final = OUTPUT_DIR / f"{stem}.apk"
+        if final.exists():
+            final.unlink()
+        shutil.move(str(signed_files[0]), str(final))
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return final
+
+    def _signer_cmd(
+        self,
+        java: Path,
+        unsigned: Path,
+        out_dir: Path,
+        debug: bool,
+        skip_align: bool,
+    ) -> list[str]:
         cmd = [
             str(java),
             "-jar",
@@ -981,6 +2204,8 @@ class Workflow:
             str(out_dir),
             "--allowResign",
         ]
+        if skip_align:
+            cmd.append("--skipZipAlign")
         if debug and DEBUG_KEYSTORE.exists():
             cmd += [
                 "--ks",
@@ -994,17 +2219,7 @@ class Workflow:
             ]
         else:
             cmd.append("--debug")
-        run_cmd(cmd, self.log)
-        signed_files = list(out_dir.glob("*.apk"))
-        if not signed_files:
-            raise RuntimeError("签名后未找到 APK")
-        stem = unsigned.stem.replace("_unsigned", "")
-        final = OUTPUT_DIR / f"{stem}.apk"
-        if final.exists():
-            final.unlink()
-        shutil.move(str(signed_files[0]), str(final))
-        shutil.rmtree(out_dir, ignore_errors=True)
-        return final
+        return cmd
 
 
 # ---------------------------------------------------------------------------
@@ -1145,11 +2360,14 @@ class PyGameToolsApp:
         self.var_sign = tk.StringVar(value="测试签名")
         self.var_status = tk.StringVar(value="请拖入 APK，或到「提包」页从手机提取")
         self.var_no_vulkan = tk.BooleanVar(value=True)
+        self.var_no_lebian_hot = tk.BooleanVar(value=False)
+        self.var_skip_cache_4g = tk.BooleanVar(value=True)
         self.var_device = tk.StringVar()
         self.var_search = tk.StringVar()
         self.var_third = tk.BooleanVar(value=True)
         self.var_merge = tk.BooleanVar(value=True)
         self.var_obb = tk.BooleanVar(value=True)
+        self.var_data = tk.BooleanVar(value=False)
         self.var_autoload = tk.BooleanVar(value=True)
 
         self.nb = ttk.Notebook(self.root)
@@ -1252,18 +2470,47 @@ class PyGameToolsApp:
 
         opts = ttk.Frame(parent, padding=(10, 0, 10, 2))
         opts.pack(fill="x")
+        ttk.Button(opts, text="识别壳", command=self.on_detect).pack(side="left", padx=(0, 12))
+        ttk.Button(opts, text="合并应用数据", command=self.on_merge_appdata).pack(
+            side="left", padx=(0, 12)
+        )
+        ttk.Button(opts, text="推送缓存到手机", command=self.on_push_yoo_cache).pack(
+            side="left", padx=(0, 12)
+        )
+        ttk.Button(opts, text="推送 GLES 配置", command=self.on_push_gles_config).pack(
+            side="left", padx=(0, 12)
+        )
+        ttk.Button(opts, text="清理登录缓存", command=self.on_clear_login_cache).pack(
+            side="left", padx=(0, 12)
+        )
+
+        flags = ttk.Frame(parent, padding=(10, 0, 10, 2))
+        flags.pack(fill="x")
         ttk.Checkbutton(
-            opts,
+            flags,
             text="强制关闭 Vulkan（仅 Unity：回编译时改为 OpenGL ES / -force-gles）",
             variable=self.var_no_vulkan,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            flags,
+            text="关闭乐变热更（回编译时关闭查新版本 / 边玩边下，需先合并应用数据）",
+            variable=self.var_no_lebian_hot,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            flags,
+            text="合并超过 4GB 时跳过 YooAsset 缓存（装机后可点「推送缓存到手机」）",
+            variable=self.var_skip_cache_4g,
         ).pack(anchor="w")
 
         ttk.Label(
             parent,
             style="Hint.TLabel",
             text=(
-                "使用说明：1.将apk拖入下方日志区或从「提包」页提取；2.点击反编译apk；"
-                "3.打开资源目录替换游戏资源和 so；4.可选填写应用信息后回编译。"
+                "使用说明：1.将apk拖入下方日志区或从「提包」页提取（会自动识别常见壳）；"
+                "2.点击反编译apk；3.有热更数据则点「合并应用数据」填回 assets，或手动打开目录替换；"
+                "4.可选填写应用信息后回编译。勾选超过 4GB 跳过缓存后，装机再点「推送缓存到手机」。"
+                "第二次启动又走 Vulkan 时，点「推送 GLES 配置」。"
+                "RenderDoc 第二次卡登录可点「清理登录缓存」（不动 yoo 资源）。"
             ),
             padding=(10, 2, 10, 6),
         ).pack(fill="x")
@@ -1325,6 +2572,11 @@ class PyGameToolsApp:
             side="left", padx=(0, 12)
         )
         ttk.Checkbutton(
+            opts,
+            text="同时提取应用数据（files / 热更缓存）",
+            variable=self.var_data,
+        ).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(
             opts, text="提取后自动选入「改包」", variable=self.var_autoload
         ).pack(side="left")
 
@@ -1352,6 +2604,7 @@ class PyGameToolsApp:
                 "手机：设置 → 关于手机，连点版本号打开开发者选项；开启 USB 调试并授权本电脑。"
                 "小米/OPPO/vivo/华为还需打开「USB 调试（安全设置）」。无需 Root。"
                 "AAB 安装的应用会有 base.apk + split_*.apk，勾选合并即可得到完整包。"
+                "热更资源在 Android/data/包名/files，勾选「应用数据」一并拉取（目录可能很大）。"
             ),
             padding=(8, 2, 8, 4),
             wraplength=920,
@@ -1476,10 +2729,11 @@ class PyGameToolsApp:
             return
         self._run_job("提取前台应用", lambda: self._job_pull_foreground(device, *self._pull_opts()))
 
-    def _pull_opts(self) -> tuple[bool, bool, bool]:
+    def _pull_opts(self) -> tuple[bool, bool, bool, bool]:
         return (
             bool(self.var_merge.get()),
             bool(self.var_obb.get()),
+            bool(self.var_data.get()),
             bool(self.var_autoload.get()),
         )
 
@@ -1539,7 +2793,13 @@ class PyGameToolsApp:
         return pkg
 
     def _job_pull(
-        self, device: str, package: str, merge: bool, with_obb: bool, autoload: bool
+        self,
+        device: str,
+        package: str,
+        merge: bool,
+        with_obb: bool,
+        with_data: bool,
+        autoload: bool,
     ) -> Path:
         adb = ensure_adb(self._thread_log)
         self._adb = adb
@@ -1549,6 +2809,7 @@ class PyGameToolsApp:
             package,
             merge=merge,
             with_obb=with_obb,
+            with_data=with_data,
             log=self._thread_log,
         )
         if autoload:
@@ -1556,14 +2817,19 @@ class PyGameToolsApp:
         return result
 
     def _job_pull_foreground(
-        self, device: str, merge: bool, with_obb: bool, autoload: bool
+        self,
+        device: str,
+        merge: bool,
+        with_obb: bool,
+        with_data: bool,
+        autoload: bool,
     ) -> Path:
         adb = ensure_adb(self._thread_log)
         self._adb = adb
         pkg = get_foreground_package(adb, device)
         self._thread_log(f"前台应用: {pkg}")
         self.q.put(("focus", pkg))
-        return self._job_pull(device, pkg, merge, with_obb, autoload)
+        return self._job_pull(device, pkg, merge, with_obb, with_data, autoload)
 
     def _browse_if_idle(self, _event=None) -> None:
         if self.busy or self.wf.apk_path:
@@ -1590,6 +2856,91 @@ class PyGameToolsApp:
         self.wf.set_apk(path)
         self.var_status.set(str(path))
         self._append(f"已选择 APK: {path}\n", "ok")
+        threading.Thread(target=self._auto_detect, args=(path,), daemon=True).start()
+
+    def _auto_detect(self, path: Path) -> None:
+        try:
+            decode = self.wf.decode_dir if self.wf.decode_dir and self.wf.decode_dir.exists() else None
+            hits, packed = detect_packers(path, decode)
+            text = format_detect_report(hits, packed)
+            self.q.put(("err" if packed else "ok", text if text.endswith("\n") else text + "\n"))
+        except Exception as exc:
+            self.q.put(("err", f"壳识别失败: {exc}\n"))
+
+    def on_detect(self) -> None:
+        if not self.wf.apk_path and not (self.wf.decode_dir and self.wf.decode_dir.exists()):
+            self._browse_apk()
+        if not self.wf.apk_path and not (self.wf.decode_dir and self.wf.decode_dir.exists()):
+            return
+        self._run_job("壳识别", self._job_detect)
+
+    def _job_detect(self) -> str:
+        hits, packed = detect_packers(self.wf.apk_path, self.wf.decode_dir)
+        text = format_detect_report(hits, packed).rstrip()
+        self._thread_log(text)
+        kinds = [h.name for h in hits]
+        return "、".join(kinds) if kinds else "未发现常见商业加固"
+
+    def _resolve_appdata(self) -> Path | None:
+        if self.wf.appdata_dir and _looks_like_appdata(self.wf.appdata_dir):
+            return self.wf.appdata_dir
+        pkg = self.var_package.get().strip()
+        guessed = guess_appdata_dir(self.wf.apk_path, pkg)
+        if guessed:
+            self.wf.appdata_dir = guessed
+            return guessed
+        path = filedialog.askdirectory(
+            title="选择应用数据目录（appdata 或 files）",
+            initialdir=str(PULL_DIR if PULL_DIR.exists() else APP_DIR),
+        )
+        if not path:
+            return None
+        chosen = Path(path)
+        self.wf.appdata_dir = chosen
+        return chosen
+
+    def on_merge_appdata(self) -> None:
+        decode = self.wf.decode_dir
+        if decode is None or not decode.exists() or not (decode / "AndroidManifest.xml").exists():
+            if not self.wf.apk_path:
+                self._browse_apk()
+            if not self.wf.apk_path:
+                return
+            if not messagebox.askyesno("PyGameTools", "尚未反编译。先反编译再合并应用数据？"):
+                return
+            appdata = self._resolve_appdata()
+            if appdata is None:
+                return
+            self._run_job("反编译并合并应用数据", lambda: self._job_decompile_and_merge(appdata))
+            return
+        appdata = self._resolve_appdata()
+        if appdata is None:
+            return
+        self._run_job("合并应用数据", lambda: self._job_merge_appdata(appdata))
+
+    def _job_merge_appdata(self, appdata: Path) -> str:
+        if not self.wf.decode_dir:
+            raise RuntimeError("请先反编译 APK")
+        stats = merge_appdata_into_decode(
+            appdata,
+            self.wf.decode_dir,
+            self._thread_log,
+            skip_cache_if_over_4g=bool(self.var_skip_cache_4g.get()),
+        )
+        extra = ""
+        if stats.get("skipped_cache"):
+            extra = (
+                f"，已跳过缓存 {stats['cache_skip_bytes'] / (1024 ** 3):.2f} GB"
+                "（装机后点「推送缓存到手机」）"
+            )
+        return (
+            f"新增 {stats['copied']}，覆盖 {stats['overwritten']}{extra}"
+            f" → {self.wf.decode_dir / 'assets'}"
+        )
+
+    def _job_decompile_and_merge(self, appdata: Path) -> str:
+        self.wf.decompile()
+        return self._job_merge_appdata(appdata)
 
     def _app_info(self) -> dict:
         return {
@@ -1598,7 +2949,114 @@ class PyGameToolsApp:
             "package": self.var_package.get().strip(),
             "app_name": self.var_appname.get().strip(),
             "disable_vulkan": bool(self.var_no_vulkan.get()),
+            "disable_lebian_hot": bool(self.var_no_lebian_hot.get()),
+            "skip_cache_if_over_4g": bool(self.var_skip_cache_4g.get()),
         }
+
+    def _push_package_name(self) -> str:
+        pkg = self.var_package.get().strip()
+        if pkg:
+            return pkg
+        if self.wf.apk_path:
+            parent = self.wf.apk_path.parent.name
+            if parent and parent not in {"pulled", "output", "work"}:
+                return parent
+            return self.wf.apk_path.stem.replace("_debug", "").replace("_unsigned", "")
+        if self.wf.decode_dir:
+            return self.wf.decode_dir.name
+        return ""
+
+    def _job_ensure_device(self) -> str:
+        try:
+            return self._selected_device()
+        except RuntimeError:
+            pass
+        adb = ensure_adb(self._thread_log)
+        self._adb = adb
+        devices = list_adb_devices(adb)
+        self.q.put(("devices", devices))
+        ready = [serial for serial, state in devices if state == "device"]
+        if not ready:
+            raise RuntimeError("没有已连接的设备，请先到「提包」页刷新设备并授权 USB 调试")
+        return ready[0]
+
+    def on_push_yoo_cache(self) -> None:
+        appdata = self._resolve_appdata()
+        if appdata is None:
+            return
+        pkg = self._push_package_name()
+        if not pkg:
+            messagebox.showinfo(
+                "PyGameTools",
+                "请填写改包页「包名」，或先选好从该包名目录提出来的 APK。",
+            )
+            return
+        if not messagebox.askyesno(
+            "PyGameTools",
+            f"将把本地 YooAsset 缓存推到手机：\n"
+            f"/sdcard/Android/data/{pkg}/files/yoo\n\n"
+            "请先装好 APK 并至少启动一次（以便生成目录）。继续？",
+        ):
+            return
+        self._run_job(
+            "推送 Yoo 缓存",
+            lambda: self._job_push_yoo_cache(appdata, pkg),
+        )
+
+    def _job_push_yoo_cache(self, appdata: Path, package: str) -> str:
+        adb = ensure_adb(self._thread_log)
+        self._adb = adb
+        device = self._job_ensure_device()
+        remote = push_yoo_cache_to_device(adb, device, package, appdata, self._thread_log)
+        return str(remote)
+
+    def on_push_gles_config(self) -> None:
+        pkg = self._push_package_name()
+        if not pkg:
+            messagebox.showinfo(
+                "PyGameTools",
+                "请填写改包页「包名」，或先选好从该包名目录提出来的 APK。",
+            )
+            return
+        if not messagebox.askyesno(
+            "PyGameTools",
+            f"将把关闭 Vulkan / 强制 GLES 的 boot.config 推到：\n"
+            f"/sdcard/Android/data/{pkg}/files/bin/Data/boot.config\n\n"
+            "用于盖住第二次启动时乐变/Unity 读到的旧配置。会 force-stop 应用。"
+            "请先装好 APK。继续？",
+        ):
+            return
+        self._run_job("推送 GLES 配置", lambda: self._job_push_gles_config(pkg))
+
+    def _job_push_gles_config(self, package: str) -> str:
+        adb = ensure_adb(self._thread_log)
+        self._adb = adb
+        device = self._job_ensure_device()
+        decode = self.wf.decode_dir if self.wf.decode_dir and self.wf.decode_dir.exists() else None
+        return push_gles_config_to_device(adb, device, package, decode, self._thread_log)
+
+    def on_clear_login_cache(self) -> None:
+        pkg = self._push_package_name()
+        if not pkg:
+            messagebox.showinfo(
+                "PyGameTools",
+                "请填写改包页「包名」，或先选好从该包名目录提出来的 APK。",
+            )
+            return
+        if not messagebox.askyesno(
+            "PyGameTools",
+            f"将清理 {pkg} 的登录缓存（shared_prefs 里带 login/token/账号等关键字的文件）。\n\n"
+            "不会删除 files/yoo 和 Android/data 下的热更资源。\n"
+            "需要已装 DebugApk。会 force-stop 应用。继续？",
+        ):
+            return
+        self._run_job("清理登录缓存", lambda: self._job_clear_login_cache(pkg))
+
+    def _job_clear_login_cache(self, package: str) -> str:
+        adb = ensure_adb(self._thread_log)
+        self._adb = adb
+        device = self._job_ensure_device()
+        return clear_login_cache_on_device(adb, device, package, self._thread_log)
 
     def on_decompile(self) -> None:
         if not self.wf.apk_path:

@@ -19,7 +19,9 @@ VideoToolbox - Python GUI OpenCV 视频处理全家桶 (含 DNN 模块)
   8. 亮度/对比度/饱和度
   9. 色彩空间转换 (灰度/HSV/LAB)
   10. 直方图均衡化
-  11. 锐化/模糊/降噪
+  11. 锐化/模糊/降噪 (传统空域)
+  11b. 视频降噪 (FFmpeg 快档 / DnCNN / SCUNet / FastDVDnet)
+  11c. VRT / Torch .pth 降噪 (独立子窗口 + 子进程，主程序不 import torch)
 
 【特效滤镜】
   12. 铅笔素描
@@ -122,7 +124,7 @@ def make_root_window() -> tk.Tk:
 # ════════════════════════════════════════════════════════════════
 
 APP_NAME = "VideoToolbox"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 APP_TITLE = f"{APP_NAME} v{APP_VERSION} - OpenCV 视频处理全家桶"
 
 DNN_MODELS_DIR = Path("models")
@@ -318,6 +320,61 @@ MODEL_REGISTRY = {
             },
         },
     },
+    "dncnn_denoise": {
+        "display_name": "DnCNN 单帧降噪 (动画/预览)",
+        "files": {
+            "dncnn_color.onnx": {
+                "url": "https://github.com/ikeno-web/npuscale/releases/download/v1.2/dncnn_color.onnx",
+                "min_size_kb": 2000,  # ~2.6MB
+                "description": "KAIR DnCNN 彩色盲降噪，单帧、体积小",
+            },
+        },
+    },
+    "scunet_denoise": {
+        "display_name": "SCUNet 单帧降噪 (更强)",
+        "files": {
+            "scunet_color_real_psnr.onnx": {
+                "url": "https://huggingface.co/Heliosoph/scunet-onnx/resolve/main/scunet_color_real_psnr.onnx",
+                "min_size_kb": 3000,  # ~3.6MB 图结构
+                "description": "SCUNet 盲降噪 ONNX 图 (需配套 .onnx.data)",
+            },
+            "scunet_color_real_psnr.onnx.data": {
+                "url": "https://huggingface.co/Heliosoph/scunet-onnx/resolve/main/scunet_color_real_psnr.onnx.data",
+                "min_size_kb": 68000,  # ~70MB 权重
+                "description": "SCUNet 权重外置数据，必须和图文件放同一目录",
+            },
+        },
+    },
+    "fastdvdnet_s15": {
+        "display_name": "FastDVDnet 时域降噪 σ=15",
+        "files": {
+            "fastdvdnet_s15.onnx": {
+                "url": "https://github.com/ikeno-web/npuscale/releases/download/v1.3/fastdvdnet_s15.onnx",
+                "min_size_kb": 8000,  # ~9.5MB
+                "description": "5 帧滑窗，轻度噪声",
+            },
+        },
+    },
+    "fastdvdnet_s25": {
+        "display_name": "FastDVDnet 时域降噪 σ=25",
+        "files": {
+            "fastdvdnet_s25.onnx": {
+                "url": "https://github.com/ikeno-web/npuscale/releases/download/v1.3/fastdvdnet_s25.onnx",
+                "min_size_kb": 8000,
+                "description": "5 帧滑窗，中等噪声 (推荐默认)",
+            },
+        },
+    },
+    "fastdvdnet_s50": {
+        "display_name": "FastDVDnet 时域降噪 σ=50",
+        "files": {
+            "fastdvdnet_s50.onnx": {
+                "url": "https://github.com/ikeno-web/npuscale/releases/download/v1.3/fastdvdnet_s50.onnx",
+                "min_size_kb": 8000,
+                "description": "5 帧滑窗，重度噪声",
+            },
+        },
+    },
 }
 
 # 保留旧接口兼容
@@ -482,6 +539,22 @@ OCR_MODELS = OrderedDict([
     ("crnn_en", "仅英文数字 (CRNN_EN, 32MB)"),
 ])
 
+DENOISE_METHODS = OrderedDict([
+    ("ffmpeg_hqdn3d", "快速 · FFmpeg hqdn3d (空域+时域)"),
+    ("ffmpeg_atadenoise", "快速 · FFmpeg atadenoise (自适应时域)"),
+    ("ffmpeg_nlmeans", "快速 · FFmpeg nlmeans"),
+    ("dncnn", "质量 · DnCNN 单帧 (动画/预览)"),
+    ("scunet", "质量 · SCUNet 单帧 (更强)"),
+    ("fastdvdnet", "质量 · FastDVDnet 时域 (5 帧)"),
+    ("opencv_nlmeans", "兜底 · OpenCV 非局部均值"),
+])
+
+DENOISE_SIGMAS = OrderedDict([
+    (15, "轻度 σ=15"),
+    (25, "中等 σ=25 (推荐)"),
+    (50, "重度 σ=50"),
+])
+
 # ── 输出编码 ────────────────────────────────────────────────
 VIDEO_CODEC_CHOICES = OrderedDict([
     ("auto", "自动 (mp4v / XVID，无需 FFmpeg)"),
@@ -490,6 +563,23 @@ VIDEO_CODEC_CHOICES = OrderedDict([
     ("mp4v", "MPEG-4 (mp4v)"),
     ("xvid", "XVID (适合 .avi)"),
 ])
+VIDEO_CONTAINER_CHOICES = OrderedDict([
+    ("mp4", "MP4 (.mp4)"),
+    ("mov", "QuickTime (.mov)"),
+    ("mkv", "Matroska (.mkv)"),
+    ("avi", "AVI (.avi)"),
+])
+
+
+def container_extension(fmt: str) -> str:
+    key = (fmt or "mp4").lower().lstrip(".")
+    return {
+        "mp4": ".mp4",
+        "mov": ".mov",
+        "m4v": ".m4v",
+        "mkv": ".mkv",
+        "avi": ".avi",
+    }.get(key, ".mp4")
 FFMPEG_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast",
                   "medium", "slow", "slower", "veryslow")
 
@@ -875,6 +965,7 @@ class ProcessingTask(Enum):
     COLOR_SPACE = auto()
     HISTOGRAM_EQ = auto()
     SHARPEN_BLUR = auto()
+    DENOISE = auto()
 
     SKETCH = auto()
     CARTOON = auto()
@@ -915,6 +1006,7 @@ VIDEO_OUTPUT_TASKS = {
     ProcessingTask.COLOR_SPACE,
     ProcessingTask.HISTOGRAM_EQ,
     ProcessingTask.SHARPEN_BLUR,
+    ProcessingTask.DENOISE,
     ProcessingTask.SKETCH,
     ProcessingTask.CARTOON,
     ProcessingTask.EMBOSS,
@@ -960,6 +1052,7 @@ FUNCTION_KEYWORDS: Dict[ProcessingTask, str] = {
     ProcessingTask.COLOR_SPACE: "colorspace gray hsv lab huidu 灰度",
     ProcessingTask.HISTOGRAM_EQ: "histogram equalize clahe zhifangtu 均衡",
     ProcessingTask.SHARPEN_BLUR: "sharpen blur denoise ruihua mohu jiangzao 降噪",
+    ProcessingTask.DENOISE: "denoise fastdvdnet dncnn scunet hqdn3d atadenoise nlmeans jiangzao zaodian 降噪 去噪 时域",
     ProcessingTask.SKETCH: "sketch pencil qianbi sumiao 素描",
     ProcessingTask.CARTOON: "cartoon anime katong 动漫",
     ProcessingTask.EMBOSS: "emboss relief fudiao",
@@ -1103,6 +1196,13 @@ class ProcessingParams:
     ocr_sample_interval: float = 0.3          # 采样间隔 (秒)
     ocr_min_duration: float = 0.4             # 短于此的条目丢掉，多半是误检
 
+    # ★ 视频降噪
+    denoise_method: str = "ffmpeg_hqdn3d"     # DENOISE_METHODS 的 key
+    denoise_sigma: int = 25                   # FastDVDnet 档位: 15 / 25 / 50
+    denoise_mix: float = 1.0                  # 与原画面混合, 1=全用降噪结果
+    denoise_content: str = "live"             # live=实拍可用时域 / animation=只用单帧
+    denoise_chroma_boost: bool = True         # FFmpeg 档对色度下手更重
+
     concat_files: List[str] = field(default_factory=list)
 
     gif_fps: int = 10
@@ -1113,6 +1213,7 @@ class ProcessingParams:
     extract_format: str = "jpg"
 
     # ★ 输出编码 (见 FrameSink)
+    output_format: str = "mp4"       # mp4 / mov / mkv / avi，决定后缀
     video_codec: str = "auto"        # auto / mp4v / xvid / h264 / h265
     rate_mode: str = "crf"           # crf (恒定质量) / bitrate (目标码率)
     crf: int = 20                    # 0=无损, 18~23 视觉无损, 越大越小越糊
@@ -1559,6 +1660,14 @@ class DNNEngine:
         for key, (onnx_name, charset_name, _) in self.CRNN_MODELS.items():
             available[key] = (self._check_model_valid(self.models_dir / onnx_name, 20000)
                               and (CHARSET_DIR / charset_name).exists())
+        available["dncnn_denoise"] = self._check_model_valid(
+            self.models_dir / "dncnn_color.onnx", 2000)
+        available["scunet_denoise"] = (
+            self._check_model_valid(self.models_dir / "scunet_color_real_psnr.onnx", 3000)
+            and self._check_model_valid(self.models_dir / "scunet_color_real_psnr.onnx.data", 68000))
+        for sigma in (15, 25, 50):
+            available[f"fastdvdnet_s{sigma}"] = self._check_model_valid(
+                self.models_dir / f"fastdvdnet_s{sigma}.onnx", 8000)
         return available
 
     # ── 人脸检测 ──────────────────────────────────────────────
@@ -2045,6 +2154,237 @@ class DNNEngine:
                     chars.append(charset[position])
             previous = index
         return "".join(chars)
+
+    # ══════════════════════════════════════════════════════════
+    #  视频降噪 (DnCNN / SCUNet / FastDVDnet)
+    # ══════════════════════════════════════════════════════════
+
+    DENOISE_ALIGN = 8
+    DENOISE_TILE = 512
+    DENOISE_OVERLAP = 16
+    DENOISE_TILE_PIXELS = 1920 * 1088   # 超过这个面积就分块，避免 4K 直接撑爆显存
+
+    FASTDVD_FILES = {15: "fastdvdnet_s15.onnx", 25: "fastdvdnet_s25.onnx",
+                     50: "fastdvdnet_s50.onnx"}
+
+    def load_spatial_denoiser(self, kind: str) -> bool:
+        """kind = dncnn / scunet。session 按模型缓存，输入高宽是动态的。"""
+        specs = {
+            "dncnn": ("dncnn_color.onnx", 2000, None),
+            "scunet": ("scunet_color_real_psnr.onnx", 3000,
+                       "scunet_color_real_psnr.onnx.data"),
+        }
+        spec = specs.get(kind)
+        if spec is None:
+            self._load_errors[f"denoise_{kind}"] = f"未知的单帧降噪模型: {kind}"
+            return False
+        filename, min_kb, extra = spec
+        key = f"denoise_{kind}"
+        if key in self._ort_sessions:
+            return True
+        if not HAS_ORT:
+            self._load_errors[key] = (
+                "需要安装 onnxruntime:\n"
+                "  pip install onnxruntime-directml   (Windows GPU, 推荐)")
+            return False
+        path = self.models_dir / filename
+        if extra and not (self.models_dir / extra).exists():
+            self._load_errors[key] = (
+                f"缺少配套权重 {extra}\n请到「工具 → 模型管理」下载 SCUNet")
+            return False
+        if not self._check_model_valid(path, min_kb):
+            self._load_errors[key] = (
+                f"缺少或损坏: {filename}\n请到「工具 → 模型管理」下载\n"
+                f"目录: {self.models_dir.absolute()}")
+            return False
+        try:
+            session = ort.InferenceSession(str(path), providers=self._preferred_providers())
+            self._ort_sessions[(key, 0)] = session
+            self._load_errors.pop(key, None)
+            LOGGER.info(f"[降噪] {kind} 就绪 ({session.get_providers()[0]})")
+            return True
+        except Exception as e:
+            self._load_errors[key] = f"加载 {filename} 失败: {e}"
+            return False
+
+    def load_fastdvdnet(self, sigma: int = 25) -> bool:
+        sigma = 15 if sigma <= 20 else (50 if sigma >= 38 else 25)
+        filename = self.FASTDVD_FILES[sigma]
+        key = f"denoise_fastdvdnet_{sigma}"
+        if (key, 0) in self._ort_sessions:
+            return True
+        if not HAS_ORT:
+            self._load_errors[key] = (
+                "需要安装 onnxruntime:\n"
+                "  pip install onnxruntime-directml   (Windows GPU, 推荐)")
+            return False
+        path = self.models_dir / filename
+        if not self._check_model_valid(path, 8000):
+            self._load_errors[key] = (
+                f"缺少或损坏: {filename}\n请到「工具 → 模型管理」下载 FastDVDnet σ={sigma}\n"
+                f"目录: {self.models_dir.absolute()}")
+            return False
+        try:
+            session = ort.InferenceSession(str(path), providers=self._preferred_providers())
+            self._ort_sessions[(key, 0)] = session
+            self._load_errors.pop(key, None)
+            LOGGER.info(f"[降噪] FastDVDnet σ={sigma} 就绪 ({session.get_providers()[0]})")
+            return True
+        except Exception as e:
+            self._load_errors[key] = f"加载 {filename} 失败: {e}"
+            return False
+
+    def resolve_denoise_method(self, method: str, sigma: int = 25,
+                               content: str = "live") -> str:
+        """
+        把用户选的方法换成当前真能跑的。
+        动画素材强制走单帧，避免时域融合把线稿糊掉。
+        """
+        if content == "animation" and method == "fastdvdnet":
+            method = "scunet" if self.load_spatial_denoiser("scunet") else "dncnn"
+        if method == "fastdvdnet":
+            if self.load_fastdvdnet(sigma):
+                return "fastdvdnet"
+            for alt in (25, 15, 50):
+                if alt != sigma and self.load_fastdvdnet(alt):
+                    LOGGER.warn(f"[降噪] FastDVDnet σ={sigma} 不可用，改用 σ={alt}")
+                    return "fastdvdnet"
+            if self.load_spatial_denoiser("dncnn"):
+                LOGGER.warn("[降噪] FastDVDnet 不可用，回退 DnCNN 单帧")
+                return "dncnn"
+            return "opencv_nlmeans"
+        if method == "scunet":
+            if self.load_spatial_denoiser("scunet"):
+                return "scunet"
+            if self.load_spatial_denoiser("dncnn"):
+                LOGGER.warn("[降噪] SCUNet 不可用，回退 DnCNN")
+                return "dncnn"
+            return "opencv_nlmeans"
+        if method == "dncnn":
+            if self.load_spatial_denoiser("dncnn"):
+                return "dncnn"
+            return "opencv_nlmeans"
+        return method
+
+    @staticmethod
+    def _bgr_to_nchw(frame: np.ndarray) -> np.ndarray:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) * (1.0 / 255.0)
+        return np.transpose(rgb, (2, 0, 1))[None]
+
+    @staticmethod
+    def _nchw_to_bgr(blob: np.ndarray) -> np.ndarray:
+        rgb = np.clip(blob[0].transpose(1, 2, 0), 0.0, 1.0)
+        return cv2.cvtColor(np.rint(rgb * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    @classmethod
+    def _pad_align(cls, frame: np.ndarray) -> Tuple[np.ndarray, int, int]:
+        h, w = frame.shape[:2]
+        ph = (cls.DENOISE_ALIGN - h % cls.DENOISE_ALIGN) % cls.DENOISE_ALIGN
+        pw = (cls.DENOISE_ALIGN - w % cls.DENOISE_ALIGN) % cls.DENOISE_ALIGN
+        if ph or pw:
+            frame = cv2.copyMakeBorder(frame, 0, ph, 0, pw, cv2.BORDER_REFLECT_101)
+        return frame, h, w
+
+    def _ort_spatial(self, session, frame: np.ndarray) -> np.ndarray:
+        padded, h, w = self._pad_align(frame)
+        inp = session.get_inputs()[0]
+        out = session.run([session.get_outputs()[0].name],
+                          {inp.name: self._bgr_to_nchw(padded)})[0]
+        return self._nchw_to_bgr(out)[:h, :w]
+
+    def _ort_spatial_tiled(self, session, frame: np.ndarray) -> np.ndarray:
+        """大分辨率分块推理，边缘用线性权重融合，避免接缝。"""
+        h, w = frame.shape[:2]
+        if h * w <= self.DENOISE_TILE_PIXELS:
+            return self._ort_spatial(session, frame)
+        tile, overlap = self.DENOISE_TILE, self.DENOISE_OVERLAP
+        acc = np.zeros((h, w, 3), np.float32)
+        weight = np.zeros((h, w, 1), np.float32)
+        ramp = self._blend_weight_map(tile, overlap).astype(np.float32)
+        ys = list(range(0, max(1, h - overlap), tile - overlap))
+        xs = list(range(0, max(1, w - overlap), tile - overlap))
+        if ys[-1] + tile < h:
+            ys.append(max(0, h - tile))
+        if xs[-1] + tile < w:
+            xs.append(max(0, w - tile))
+        for y in ys:
+            for x in xs:
+                y1, x1 = min(h, y + tile), min(w, x + tile)
+                patch = frame[y:y1, x:x1]
+                cleaned = self._ort_spatial(session, patch)
+                ph, pw = cleaned.shape[:2]
+                wmap = ramp[:ph, :pw] if ph == tile and pw == tile \
+                    else np.ones((ph, pw, 1), np.float32)
+                acc[y:y + ph, x:x + pw] += cleaned.astype(np.float32) * wmap
+                weight[y:y + ph, x:x + pw] += wmap
+        return np.clip(acc / np.maximum(weight, 1e-6), 0, 255).astype(np.uint8)
+
+    def denoise_spatial(self, frame: np.ndarray, kind: str) -> np.ndarray:
+        session = self._ort_sessions.get((f"denoise_{kind}", 0))
+        if session is None:
+            return frame
+        try:
+            return self._ort_spatial_tiled(session, frame)
+        except Exception as e:
+            LOGGER.warn(f"[降噪] {kind} 推理失败，回退原图: {e}")
+            return frame
+
+    def denoise_fastdvdnet(self, frames: List[np.ndarray], sigma: int = 25) -> np.ndarray:
+        """frames 必须是 5 帧、同一尺寸的 BGR。输出对应中间那一帧。"""
+        if len(frames) != 5:
+            return frames[len(frames) // 2] if frames else np.zeros((2, 2, 3), np.uint8)
+        sigma = 15 if sigma <= 20 else (50 if sigma >= 38 else 25)
+        session = self._ort_sessions.get((f"denoise_fastdvdnet_{sigma}", 0))
+        if session is None:
+            for alt in (25, 15, 50):
+                session = self._ort_sessions.get((f"denoise_fastdvdnet_{alt}", 0))
+                if session is not None:
+                    break
+        if session is None:
+            return frames[2]
+        h, w = frames[2].shape[:2]
+        try:
+            padded = [self._pad_align(f)[0] for f in frames]
+            ph, pw = padded[0].shape[:2]
+            if ph * pw > self.DENOISE_TILE_PIXELS:
+                return self._fastdvd_tiled(session, padded, h, w)
+            blob = np.concatenate([self._bgr_to_nchw(f)[0] for f in padded], axis=0)[None]
+            inp = session.get_inputs()[0]
+            out = session.run([session.get_outputs()[0].name], {inp.name: blob})[0]
+            return self._nchw_to_bgr(out)[:h, :w]
+        except Exception as e:
+            LOGGER.warn(f"[降噪] FastDVDnet 推理失败，回退中间帧: {e}")
+            return frames[2]
+
+    def _fastdvd_tiled(self, session, padded: List[np.ndarray],
+                       orig_h: int, orig_w: int) -> np.ndarray:
+        h, w = padded[0].shape[:2]
+        tile, overlap = self.DENOISE_TILE, self.DENOISE_OVERLAP
+        acc = np.zeros((h, w, 3), np.float32)
+        weight = np.zeros((h, w, 1), np.float32)
+        ramp = self._blend_weight_map(tile, overlap).astype(np.float32)
+        ys = list(range(0, max(1, h - overlap), tile - overlap))
+        xs = list(range(0, max(1, w - overlap), tile - overlap))
+        if ys[-1] + tile < h:
+            ys.append(max(0, h - tile))
+        if xs[-1] + tile < w:
+            xs.append(max(0, w - tile))
+        inp = session.get_inputs()[0]
+        out_name = session.get_outputs()[0].name
+        for y in ys:
+            for x in xs:
+                y1, x1 = min(h, y + tile), min(w, x + tile)
+                patches = [f[y:y1, x:x1] for f in padded]
+                aligned = [self._pad_align(p)[0] for p in patches]
+                ah, aw = patches[0].shape[:2]
+                blob = np.concatenate([self._bgr_to_nchw(p)[0] for p in aligned], 0)[None]
+                out = session.run([out_name], {inp.name: blob})[0]
+                cleaned = self._nchw_to_bgr(out)[:ah, :aw]
+                wmap = ramp[:ah, :aw] if ah == tile and aw == tile \
+                    else np.ones((ah, aw, 1), np.float32)
+                acc[y:y + ah, x:x + aw] += cleaned.astype(np.float32) * wmap
+                weight[y:y + ah, x:x + aw] += wmap
+        return np.clip(acc / np.maximum(weight, 1e-6), 0, 255).astype(np.uint8)[:orig_h, :orig_w]
 
      # ══════════════════════════════════════════════════════════
     #  ★★★ 去马赛克 / 超分辨率 — 完全重写 ★★★
@@ -3887,12 +4227,20 @@ class VideoEngine:
         self._subtitles: Optional[SubtitleBurner] = None
         self._bg_replacement: Optional[np.ndarray] = None
         self._rvm_fallback_logged = False
+        self._ffmpeg_proc: Optional[subprocess.Popen] = None
+        self._denoise_resolved: str = ""
 
     def set_progress_callback(self, callback: Callable[[float, str], None]):
         self._progress_callback = callback
 
     def cancel(self):
         self._cancel = True
+        proc = self._ffmpeg_proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
     @property
     def is_cancelled(self) -> bool:
@@ -3972,6 +4320,12 @@ class VideoEngine:
             # ★ cap 已在 _analyze_video 中 release
             return result
 
+        # ═══ FFmpeg 整段降噪：时域滤镜必须走流式滤镜图，不能逐帧 ═══
+        if (params.task == ProcessingTask.DENOISE
+                and params.denoise_method.startswith("ffmpeg_")
+                and ffmpeg_available()):
+            return self._ffmpeg_denoise(params)
+
         # ═══ 字幕 OCR：产出的是 SRT 文本，不走视频编码器 ═══
         if params.task == ProcessingTask.SUBTITLE_OCR:
             cap = cv2.VideoCapture(params.input_path)
@@ -4026,9 +4380,8 @@ class VideoEngine:
 
         if params.task == ProcessingTask.PIPELINE:
             for pt in params.pipeline_tasks:
-                sub_params = ProcessingParams(task=pt)
-                sub_params.style_model_name = params.style_model_name
-                sub_params.demosaic_model = params.demosaic_model
+                sub_params = copy.copy(params)
+                sub_params.task = pt
                 if not self._init_dnn_for_task(sub_params):
                     cap.release()
                     sink.close()
@@ -4038,6 +4391,8 @@ class VideoEngine:
         processed = 0
         total_to_process = end_frame - start_frame
         write_failed = False
+        temporal = self._temporal_denoise_split(params)
+        hist: List[np.ndarray] = []
 
         while not self._cancel:
             ret, frame = cap.read()
@@ -4051,7 +4406,15 @@ class VideoEngine:
             # 输出 fps，这样即使在做帧率转换，字幕也还是对齐原始时间轴的。
             self._frame_time = (current_frame - 1) / fps if fps > 0 else 0.0
 
-            if params.task == ProcessingTask.PIPELINE:
+            if temporal is not None:
+                pre_tasks, post_tasks = temporal
+                incoming = self._apply_task_list(frame, params, pre_tasks)
+                hist.append(incoming)
+                emit_idx = len(hist) - 3
+                if emit_idx < 0:
+                    continue
+                processed_frame = self._emit_temporal_denoise(hist, emit_idx, params, post_tasks)
+            elif params.task == ProcessingTask.PIPELINE:
                 processed_frame = self._process_frame_pipeline(frame, params)
             else:
                 processed_frame = self._process_frame(frame, params)
@@ -4065,6 +4428,15 @@ class VideoEngine:
                 progress = processed / total_to_process
                 self._report_progress(progress,
                     f"处理中: {processed}/{total_to_process} 帧 ({progress * 100:.1f}%)")
+
+        if temporal is not None and hist and not write_failed and not self._cancel:
+            _, post_tasks = temporal
+            for emit_idx in range(max(0, len(hist) - 2), len(hist)):
+                processed_frame = self._emit_temporal_denoise(hist, emit_idx, params, post_tasks)
+                if not sink.write(processed_frame):
+                    write_failed = True
+                    break
+                processed += 1
 
         cap.release()
         closed_ok = sink.close()
@@ -4117,10 +4489,9 @@ class VideoEngine:
                 return base_no_ext + '.gif'
             return path
         else:
-            if current_ext_lower in ('.png', '.jpg', '.jpeg', '.bmp', '.gif'):
-                return base_no_ext + '.mp4'
-            elif current_ext_lower == '':
-                return base_no_ext + '.mp4'
+            want = container_extension(getattr(params, "output_format", "mp4"))
+            if current_ext_lower != want.lower():
+                return base_no_ext + want
             return path
 
     def _get_output_size(self, params: ProcessingParams,
@@ -4244,7 +4615,31 @@ class VideoEngine:
                 # 自动降级到传统方法，这里只负责把原因告诉用户
                 self._report_progress(0, f"去马赛克模型加载失败，改用传统增强方法\n{err}")
                 LOGGER.warn(f"去马赛克模型 {params.demosaic_model} 加载失败: {err}")
+        elif task == ProcessingTask.DENOISE:
+            self._prepare_denoise(params)
         return True
+
+    def _prepare_denoise(self, params: ProcessingParams):
+        method = params.denoise_method
+        if method.startswith("ffmpeg_"):
+            if ffmpeg_available():
+                self._denoise_resolved = method
+                return
+            LOGGER.warn("[降噪] 未检测到 FFmpeg，快档退回 OpenCV 非局部均值")
+            self._denoise_resolved = "opencv_nlmeans"
+            self._report_progress(0, "未检测到 FFmpeg，快档已改用 OpenCV 非局部均值")
+            return
+        if method == "opencv_nlmeans":
+            self._denoise_resolved = method
+            return
+        resolved = self.dnn.resolve_denoise_method(
+            method, params.denoise_sigma, params.denoise_content)
+        self._denoise_resolved = resolved
+        if resolved != method:
+            err = (self.dnn.get_load_error(f"denoise_{method}")
+                   or self.dnn.get_load_error(f"denoise_fastdvdnet_{params.denoise_sigma}")
+                   or "")
+            self._report_progress(0, f"降噪模型 {method} 不可用，已改用 {resolved}\n{err}")
 
     def _init_segmentation(self, params: ProcessingParams) -> bool:
         """
@@ -4317,6 +4712,8 @@ class VideoEngine:
             if params.denoise_strength > 0:
                 result = self.filter.denoise(result, params.denoise_strength)
             return result
+        if task == ProcessingTask.DENOISE:
+            return self._denoise_spatial_frame(frame, params)
         if task == ProcessingTask.SKETCH:
             return self.filter.pencil_sketch(frame)
         if task == ProcessingTask.CARTOON:
@@ -4570,6 +4967,194 @@ class VideoEngine:
             sub_params.task = task
             result = self._process_frame(result, sub_params)
         return result
+
+    def _apply_task_list(self, frame: np.ndarray, params: ProcessingParams,
+                         tasks: List[ProcessingTask]) -> np.ndarray:
+        result = frame
+        for task in tasks:
+            sub = copy.copy(params)
+            sub.task = task
+            result = self._process_frame(result, sub)
+        return result
+
+    def _wants_temporal_denoise(self, params: ProcessingParams) -> bool:
+        if params.denoise_content == "animation":
+            return False
+        method = self._denoise_resolved or params.denoise_method
+        return method == "fastdvdnet"
+
+    def _temporal_denoise_split(self, params: ProcessingParams
+                                ) -> Optional[Tuple[List[ProcessingTask], List[ProcessingTask]]]:
+        if not self._wants_temporal_denoise(params):
+            return None
+        if params.task == ProcessingTask.DENOISE:
+            return [], []
+        if params.task == ProcessingTask.PIPELINE and ProcessingTask.DENOISE in params.pipeline_tasks:
+            idx = params.pipeline_tasks.index(ProcessingTask.DENOISE)
+            return params.pipeline_tasks[:idx], params.pipeline_tasks[idx + 1:]
+        return None
+
+    @staticmethod
+    def _mix_denoise(src: np.ndarray, den: np.ndarray, mix: float) -> np.ndarray:
+        mix = float(np.clip(mix, 0.0, 1.0))
+        if mix >= 0.999:
+            return den
+        if mix <= 0.001:
+            return src
+        if den.shape[:2] != src.shape[:2]:
+            den = cv2.resize(den, (src.shape[1], src.shape[0]), interpolation=cv2.INTER_LINEAR)
+        return cv2.addWeighted(den, mix, src, 1.0 - mix, 0)
+
+    def _denoise_spatial_frame(self, frame: np.ndarray, params: ProcessingParams) -> np.ndarray:
+        method = self._denoise_resolved or params.denoise_method
+        if method == "fastdvdnet":
+            return frame
+        if method in ("dncnn", "scunet"):
+            cleaned = self.dnn.denoise_spatial(frame, method)
+        else:
+            # FFmpeg 整段滤镜进不了流程组合，这里用 OpenCV 非局部均值顶上
+            strength = 6 if params.denoise_sigma <= 20 else (10 if params.denoise_sigma <= 35 else 16)
+            cleaned = self.filter.denoise(frame, strength)
+        return self._mix_denoise(frame, cleaned, params.denoise_mix)
+
+    def _emit_temporal_denoise(self, hist: List[np.ndarray], index: int,
+                               params: ProcessingParams,
+                               post_tasks: List[ProcessingTask]) -> np.ndarray:
+        n = len(hist)
+        window = [hist[min(n - 1, max(0, index + off))] for off in (-2, -1, 0, 1, 2)]
+        cleaned = self.dnn.denoise_fastdvdnet(window, params.denoise_sigma)
+        mixed = self._mix_denoise(hist[index], cleaned, params.denoise_mix)
+        return self._apply_task_list(mixed, params, post_tasks)
+
+    def _ffmpeg_denoise_filter(self, params: ProcessingParams) -> str:
+        s = float(np.clip(params.denoise_mix, 0.05, 1.0))
+        chroma = 1.35 if params.denoise_chroma_boost else 1.0
+        if params.denoise_sigma >= 38:
+            s = min(1.0, s * 1.25)
+        elif params.denoise_sigma <= 20:
+            s *= 0.75
+        method = params.denoise_method
+        if method == "ffmpeg_atadenoise":
+            span = 5 + int(round(4 * s))
+            if span % 2 == 0:
+                span += 1
+            return f"atadenoise=s={span}:p={0.01 + 0.03 * s:.3f}"
+        if method == "ffmpeg_nlmeans":
+            return (f"nlmeans=s={1.0 + 8.0 * s:.2f}:p={3 + int(6 * s)}:"
+                    f"pc={max(1, int((3 + 6 * s) * chroma))}:"
+                    f"r={7 + int(10 * s)}")
+        # hqdn3d
+        return (f"hqdn3d={1.5 + 6 * s:.2f}:{((1.0 + 4.5 * s) * chroma):.2f}:"
+                f"{2.0 + 10 * s:.2f}:{((2.0 + 8 * s) * chroma):.2f}")
+
+    def _ffmpeg_denoise(self, params: ProcessingParams) -> bool:
+        if not ffmpeg_available():
+            self._report_progress(-1, "FFmpeg 未安装或不在 PATH，无法使用快档滤镜")
+            return False
+        vf = self._ffmpeg_denoise_filter(params)
+        info = self.get_video_info(params.input_path)
+        duration = 0.0
+        if info and info.duration > 0:
+            start = max(0.0, params.start_time)
+            end = params.end_time if params.end_time > 0 else info.duration
+            duration = max(0.01, end - start)
+
+        codec = (params.video_codec or "auto").lower()
+        encoder = FrameSink.FFMPEG_CODECS.get(codec, "libx264")
+        if codec not in FrameSink.FFMPEG_CODECS:
+            encoder = "libx264"
+
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-progress", "pipe:1"]
+        if params.start_time > 0:
+            cmd += ["-ss", f"{params.start_time:.3f}"]
+        if params.end_time > 0:
+            cmd += ["-to", f"{params.end_time:.3f}"]
+        cmd += ["-i", params.input_path, "-vf", vf]
+        if params.keep_audio and params.task != ProcessingTask.FPS_CHANGE:
+            cmd += ["-c:a", "aac", "-b:a", "192k"]
+        else:
+            cmd += ["-an"]
+        cmd += ["-c:v", encoder,
+                "-preset", params.encode_preset if params.encode_preset in FFMPEG_PRESETS else "medium"]
+        if params.rate_mode == "bitrate":
+            br = max(100, int(params.bitrate_kbps))
+            cmd += ["-b:v", f"{br}k", "-maxrate", f"{br * 2}k", "-bufsize", f"{br * 4}k"]
+        else:
+            cmd += ["-crf", str(int(min(51, max(0, params.crf))))]
+        cmd += ["-pix_fmt", "yuv420p"]
+        if encoder == "libx265":
+            cmd += ["-tag:v", "hvc1"]
+        if os.path.splitext(params.output_path)[1].lower() in (".mp4", ".mov", ".m4v"):
+            cmd += ["-movflags", "+faststart"]
+        cmd.append(params.output_path)
+
+        LOGGER.info("FFmpeg 降噪: " + " ".join(cmd))
+        self._report_progress(0.02, f"FFmpeg 快档处理中 ({vf}) ...")
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace", **SUBPROCESS_FLAGS)
+        except Exception as e:
+            self._report_progress(-1, f"启动 FFmpeg 失败: {e}")
+            return False
+        self._ffmpeg_proc = proc
+        last_t = 0.0
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if self._cancel:
+                    proc.terminate()
+                    break
+                line = line.strip()
+                if line.startswith("out_time_ms="):
+                    try:
+                        last_t = int(line.split("=", 1)[1]) / 1_000_000.0
+                    except ValueError:
+                        continue
+                    if duration > 0:
+                        self._report_progress(min(0.99, last_t / duration),
+                                              f"FFmpeg 降噪 {last_t:.1f}s / {duration:.1f}s")
+            stderr = proc.stderr.read() if proc.stderr else ""
+            ret = proc.wait(timeout=15)
+        except Exception as e:
+            self._report_progress(-1, f"FFmpeg 降噪失败: {e}")
+            self._remove_quietly(params.output_path)
+            return False
+        finally:
+            self._ffmpeg_proc = None
+
+        if self._cancel:
+            self._report_progress(-1, "已取消")
+            self._remove_quietly(params.output_path)
+            return False
+        if ret != 0 or not os.path.exists(params.output_path) or os.path.getsize(params.output_path) < 500:
+            self._report_progress(-1, f"FFmpeg 降噪失败 (exit {ret})\n{stderr[-400:]}")
+            self._remove_quietly(params.output_path)
+            return False
+        self._report_progress(1.0, f"处理完成! (FFmpeg {vf})\n{params.output_path}")
+        return True
+
+    def _ffmpeg_preview_frame(self, input_path: str, params: ProcessingParams,
+                              time_pos: float) -> Optional[np.ndarray]:
+        if not ffmpeg_available():
+            return None
+        vf = self._ffmpeg_denoise_filter(params)
+        ss = max(0.0, time_pos - 0.4)
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+               "-ss", f"{ss:.3f}", "-i", input_path, "-vf", vf,
+               "-ss", f"{max(0.0, time_pos - ss):.3f}",
+               "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=20, **SUBPROCESS_FLAGS)
+        except Exception as e:
+            LOGGER.warn(f"FFmpeg 预览失败: {e}")
+            return None
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        arr = np.frombuffer(proc.stdout, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        return img
 
     def _background_blur(self, frame: np.ndarray, params: ProcessingParams) -> np.ndarray:
         """
@@ -5020,16 +5605,6 @@ class VideoEngine:
 
     def preview_frame(self, input_path: str, params: ProcessingParams,
                       time_pos: float = 0.0) -> Optional[np.ndarray]:
-        cap = cv2.VideoCapture(input_path)
-        if not cap.isOpened():
-            return None
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(time_pos * fps))
-        ret, frame = cap.read()
-        cap.release()
-        if not ret:
-            return None
-
         if params.style_reference_path and os.path.exists(params.style_reference_path):
             self._style_reference_img = cv2.imread(params.style_reference_path)
 
@@ -5041,14 +5616,51 @@ class VideoEngine:
             list(params.pipeline_tasks) if params.task == ProcessingTask.PIPELINE
             else [params.task])
         self._init_dnn_for_task(params)
-
         if params.task == ProcessingTask.PIPELINE:
             for pt in params.pipeline_tasks:
                 sub_p = copy.copy(params)
                 sub_p.task = pt
                 self._init_dnn_for_task(sub_p)
-            return self._process_frame_pipeline(frame, params)
 
+        if ((params.task == ProcessingTask.DENOISE
+             or (params.task == ProcessingTask.PIPELINE
+                 and ProcessingTask.DENOISE in params.pipeline_tasks))
+                and params.denoise_method.startswith("ffmpeg_")
+                and params.task != ProcessingTask.PIPELINE):
+            preview = self._ffmpeg_preview_frame(input_path, params, time_pos)
+            if preview is not None:
+                return preview
+
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            return None
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        center = int(time_pos * fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, center))
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
+            return None
+
+        temporal = self._temporal_denoise_split(params)
+        if temporal is not None:
+            pre_tasks, post_tasks = temporal
+            hist: List[np.ndarray] = []
+            for off in (-2, -1, 0, 1, 2):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, center + off))
+                ok, fr = cap.read()
+                if ok:
+                    hist.append(self._apply_task_list(fr, params, pre_tasks))
+            cap.release()
+            if not hist:
+                return frame
+            while len(hist) < 5:
+                hist.append(hist[-1])
+            return self._emit_temporal_denoise(hist[:5], 2, params, post_tasks)
+
+        cap.release()
+        if params.task == ProcessingTask.PIPELINE:
+            return self._process_frame_pipeline(frame, params)
         return self._process_frame(frame, params)
 
 
@@ -5290,6 +5902,7 @@ class MainWindow:
                 ("色彩空间转换", ProcessingTask.COLOR_SPACE),
                 ("直方图均衡化", ProcessingTask.HISTOGRAM_EQ),
                 ("锐化/模糊/降噪", ProcessingTask.SHARPEN_BLUR),
+                ("视频降噪 (FFmpeg / AI)", ProcessingTask.DENOISE),
             ],
             "✨ 特效滤镜": [
                 ("铅笔素描", ProcessingTask.SKETCH),
@@ -5314,7 +5927,7 @@ class MainWindow:
                 ("人脸马赛克", ProcessingTask.FACE_MOSAIC),
                 ("背景虚化 / 人像分割", ProcessingTask.BG_BLUR),
                 ("文字检测 (EAST)", ProcessingTask.TEXT_DETECT),
-                ("去马赛克/超分重建", ProcessingTask.DEMOSAIC),  # ★ 新增
+                ("去马赛克/超分重建", ProcessingTask.DEMOSAIC),
                 ("字幕 OCR → 导出 SRT", ProcessingTask.SUBTITLE_OCR),
             ],
             "📊 分析工具": [
@@ -5427,6 +6040,7 @@ class MainWindow:
         self.concat_file_list = []
 
         # ★ 输出编码
+        self.var_output_format = tk.StringVar(value="mp4")
         self.var_video_codec = tk.StringVar(value="auto")
         self.var_rate_mode = tk.StringVar(value="crf")
         self.var_crf = tk.IntVar(value=20)
@@ -5512,6 +6126,13 @@ class MainWindow:
         self.var_ocr_interval = tk.DoubleVar(value=0.3)
         self.var_ocr_min_duration = tk.DoubleVar(value=0.4)
 
+        # ★ 视频降噪
+        self.var_dn_method = tk.StringVar(value="ffmpeg_hqdn3d")
+        self.var_dn_sigma = tk.IntVar(value=25)
+        self.var_dn_mix = tk.DoubleVar(value=1.0)
+        self.var_dn_content = tk.StringVar(value="live")
+        self.var_dn_chroma = tk.BooleanVar(value=True)
+
         self.pipeline_vars: Dict[ProcessingTask, tk.BooleanVar] = {}
         for task in VIDEO_OUTPUT_TASKS:
             if task != ProcessingTask.TRIM:
@@ -5525,6 +6146,22 @@ class MainWindow:
         ttk.Label(row, text="输出路径:").pack(side="left")
         ttk.Entry(row, textvariable=self.var_output_path, width=20).pack(side="left", fill="x", expand=True, padx=5)
         ttk.Button(row, text="浏览", command=self._browse_output).pack(side="right")
+        fmt_row = ttk.Frame(out_frame)
+        fmt_row.pack(fill="x", padx=5, pady=(0, 3))
+        ttk.Label(fmt_row, text="输出格式:").pack(side="left")
+        self._format_keys = list(VIDEO_CONTAINER_CHOICES.keys())
+        format_box = ttk.Combobox(
+            fmt_row, state="readonly", width=18, font=("Microsoft YaHei", 9),
+            values=[VIDEO_CONTAINER_CHOICES[k] for k in self._format_keys],
+        )
+        format_box.pack(side="left", padx=5)
+        current_fmt = self.var_output_format.get() if self.var_output_format.get() in self._format_keys else "mp4"
+        format_box.current(self._format_keys.index(current_fmt))
+        format_box.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self._on_output_format_change(self._format_keys[format_box.current()]),
+        )
+        self._format_box = format_box
         self.output_hint_label = ttk.Label(out_frame, text="", style="Info.TLabel", wraplength=260)
         self.output_hint_label.pack(fill="x", padx=5, pady=(0, 3))
         self._output_frame = out_frame
@@ -5599,6 +6236,25 @@ class MainWindow:
         self._audio_check.pack(anchor="w", padx=8, pady=(4, 6))
 
         self._on_codec_change(self.var_video_codec.get())
+
+    def _video_container_ext(self) -> str:
+        return container_extension(self.var_output_format.get())
+
+    def _task_uses_video_container(self, task: Optional[ProcessingTask] = None) -> bool:
+        task = self._current_task if task is None else task
+        if task is None:
+            return True
+        if task in ANALYSIS_TASKS:
+            return False
+        if task in (ProcessingTask.TO_GIF, ProcessingTask.EXTRACT_FRAMES,
+                    ProcessingTask.SUBTITLE_OCR):
+            return False
+        return True
+
+    def _on_output_format_change(self, fmt_key: str):
+        self.var_output_format.set(fmt_key)
+        if self._task_uses_video_container():
+            self._auto_fix_output_extension(container_extension(fmt_key))
 
     def _on_codec_change(self, codec_key: str):
         self.var_video_codec.set(codec_key)
@@ -5711,13 +6367,13 @@ class MainWindow:
             self._auto_fix_output_extension('.gif')
         elif task == ProcessingTask.PIPELINE:
             self.output_hint_label.configure(text="🔗 流程组合：勾选多个功能串联处理")
+        elif task == ProcessingTask.DENOISE:
+            self.output_hint_label.configure(
+                text="🎚 快档走 FFmpeg 整段滤镜；AI 档按模型逐帧/5 帧窗处理")
         else:
             self.output_hint_label.configure(text="")
-            current = self.var_output_path.get()
-            if current:
-                _, ext = os.path.splitext(current)
-                if ext.lower() in ('.png', '.jpg', '.gif', '.bmp', '.srt'):
-                    self._auto_fix_output_extension('.mp4')
+        if self._task_uses_video_container(task) and self.var_output_path.get():
+            self._auto_fix_output_extension(self._video_container_ext())
 
         if self.current_video_info:
             try:
@@ -5755,6 +6411,7 @@ class MainWindow:
             ProcessingTask.BRIGHTNESS_CONTRAST: self._build_brightness_params,
             ProcessingTask.COLOR_SPACE: self._build_colorspace_params,
             ProcessingTask.SHARPEN_BLUR: self._build_blur_params,
+            ProcessingTask.DENOISE: self._build_denoise_params,
             ProcessingTask.EDGE_DETECT: self._build_edge_params,
             ProcessingTask.COLOR_TONE: self._build_tone_params,
             ProcessingTask.MOSAIC: self._build_mosaic_params,
@@ -5891,6 +6548,59 @@ class MainWindow:
         ttk.Label(parent, text="降噪强度:").pack(anchor="w", padx=10, pady=(5, 0))
         ttk.Scale(parent, from_=0, to=30, variable=self.var_denoise, orient="horizontal").pack(
             fill="x", padx=10, pady=2)
+
+    def _build_denoise_params(self, parent):
+        ttk.Label(parent, text="🎚 视频降噪", style="Header.TLabel").pack(padx=10, pady=(5, 2))
+        status = self.engine.dnn.get_available_models()
+        ffmpeg_ok = ffmpeg_available()
+        ttk.Label(parent, text="快档 · 不需要模型", style="Info.TLabel").pack(anchor="w", padx=10, pady=(6, 0))
+        for key in ("ffmpeg_hqdn3d", "ffmpeg_atadenoise", "ffmpeg_nlmeans"):
+            mark = "✅" if ffmpeg_ok else "❌ 需 FFmpeg"
+            ttk.Radiobutton(parent, text=f"{mark} {DENOISE_METHODS[key]}",
+                            variable=self.var_dn_method, value=key,
+                            command=self._refresh_preview_quietly).pack(anchor="w", padx=16)
+
+        ttk.Label(parent, text="质量档 · AI 模型", style="Info.TLabel").pack(anchor="w", padx=10, pady=(8, 0))
+        ai_status = {
+            "dncnn": status.get("dncnn_denoise", False),
+            "scunet": status.get("scunet_denoise", False),
+            "fastdvdnet": any(status.get(f"fastdvdnet_s{s}", False) for s in (15, 25, 50)),
+        }
+        for key in ("dncnn", "scunet", "fastdvdnet"):
+            mark = "✅" if (ai_status[key] and HAS_ORT) else (
+                "⚠️ 需 onnxruntime" if ai_status[key] else "❌ 未下载")
+            ttk.Radiobutton(parent, text=f"{mark} {DENOISE_METHODS[key]}",
+                            variable=self.var_dn_method, value=key,
+                            command=self._refresh_preview_quietly).pack(anchor="w", padx=16)
+
+        ttk.Radiobutton(parent, text=DENOISE_METHODS["opencv_nlmeans"],
+                        variable=self.var_dn_method, value="opencv_nlmeans",
+                        command=self._refresh_preview_quietly).pack(anchor="w", padx=16, pady=(4, 0))
+
+        ttk.Label(parent, text="素材类型:").pack(anchor="w", padx=10, pady=(8, 0))
+        ttk.Radiobutton(parent, text="实拍 (可用 5 帧时域)", variable=self.var_dn_content,
+                        value="live", command=self._refresh_preview_quietly).pack(anchor="w", padx=20)
+        ttk.Radiobutton(parent, text="动画 / 录屏 (只用单帧，避免糊线)",
+                        variable=self.var_dn_content, value="animation",
+                        command=self._refresh_preview_quietly).pack(anchor="w", padx=20)
+
+        ttk.Label(parent, text="噪声强度档 (FastDVDnet / 滤镜力度):").pack(
+            anchor="w", padx=10, pady=(8, 0))
+        for sigma, label in DENOISE_SIGMAS.items():
+            ttk.Radiobutton(parent, text=label, variable=self.var_dn_sigma, value=sigma,
+                            command=self._refresh_preview_quietly).pack(anchor="w", padx=20)
+
+        self._row_slider(parent, "混合强度 (越大越干净):", self.var_dn_mix, 0.0, 1.0)
+        ttk.Checkbutton(parent, text="色度多降一点 (消灭色斑，FFmpeg 档更明显)",
+                        variable=self.var_dn_chroma,
+                        command=self._refresh_preview_quietly).pack(anchor="w", padx=10, pady=4)
+        ttk.Label(parent,
+                  text="快档走 FFmpeg 整段滤镜，速度快、不编造细节。\n"
+                       "FastDVDnet 看前后各 2 帧，实拍优先；动画请切单帧。\n"
+                       "模型在「工具 → 模型管理」下载，缺了会自动降级。",
+                  style="Info.TLabel", wraplength=250, justify="left").pack(padx=10, pady=6)
+        ttk.Button(parent, text="VRT / Torch .pth（独立窗口）...",
+                   command=self._open_torch_pth_window).pack(fill="x", padx=10, pady=(2, 8))
 
     def _build_edge_params(self, parent):
         ttk.Label(parent, text="检测方法:").pack(anchor="w", padx=10, pady=(5, 0))
@@ -6645,7 +7355,8 @@ class MainWindow:
                 (ProcessingTask.BRIGHTNESS_CONTRAST, "亮度/对比度/饱和度"),
                 (ProcessingTask.COLOR_SPACE, "色彩空间转换"),
                 (ProcessingTask.HISTOGRAM_EQ, "直方图均衡化"),
-                (ProcessingTask.SHARPEN_BLUR, "锐化/模糊/降噪"),
+                (ProcessingTask.SHARPEN_BLUR, "锐化/模糊"),
+                (ProcessingTask.DENOISE, "视频降噪"),
             ],
             "特效滤镜": [
                 (ProcessingTask.SKETCH, "铅笔素描"),
@@ -6743,6 +7454,7 @@ class MainWindow:
         ("Ctrl+F", "定位到功能搜索框"),
         ("Ctrl+L", "打开处理日志窗口"),
         ("Ctrl+M", "打开 DNN 模型管理"),
+        ("Ctrl+T", "打开 VRT / Torch .pth 子窗口"),
         ("F5", "预览当前参数效果"),
         ("F9 / Ctrl+Enter", "开始处理"),
         ("Esc", "取消处理"),
@@ -6776,6 +7488,8 @@ class MainWindow:
         m_tool.add_command(label="处理日志...", accelerator="Ctrl+L", command=self._show_log_window)
         m_tool.add_command(label="DNN 模型管理...", accelerator="Ctrl+M",
                            command=self._show_model_manager)
+        m_tool.add_command(label="VRT / Torch .pth 降噪...", accelerator="Ctrl+T",
+                           command=self._open_torch_pth_window)
         m_tool.add_separator()
         m_tool.add_command(label="打开日志目录", command=lambda: self._open_path(LOG_DIR))
         m_tool.add_command(label="打开预设目录", command=lambda: self._open_path(PRESET_DIR))
@@ -6801,6 +7515,7 @@ class MainWindow:
         bind("<Control-r>", self._load_preset)
         bind("<Control-l>", self._show_log_window)
         bind("<Control-m>", self._show_model_manager)
+        bind("<Control-t>", self._open_torch_pth_window)
         bind("<Control-f>", self._focus_search)
         bind("<F5>", self._preview)
         bind("<F9>", self._start_processing)
@@ -7039,6 +7754,11 @@ class MainWindow:
             var.set(task.name in saved_pipeline)
 
         # 编码面板的联动状态不由变量本身驱动，需要手动同步一次
+        if hasattr(self, "_format_box"):
+            fmt = self.var_output_format.get()
+            if fmt in self._format_keys:
+                self._format_box.current(self._format_keys.index(fmt))
+            self._on_output_format_change(fmt)
         if hasattr(self, "_codec_box"):
             codec = self.var_video_codec.get()
             if codec in self._codec_keys:
@@ -7154,8 +7874,7 @@ class MainWindow:
         self._refresh_batch_tree()
         return added
 
-    @staticmethod
-    def _default_ext_for_task(task: Optional[ProcessingTask], source_ext: str) -> str:
+    def _default_ext_for_task(self, task: Optional[ProcessingTask], source_ext: str) -> str:
         if task in ANALYSIS_TASKS:
             return ".png"
         if task == ProcessingTask.SUBTITLE_OCR:
@@ -7164,7 +7883,7 @@ class MainWindow:
             return ".gif"
         if task == ProcessingTask.EXTRACT_FRAMES:
             return ""          # 输出的是目录
-        return source_ext if source_ext.lower() in VIDEO_EXTENSIONS else ".mp4"
+        return self._video_container_ext()
 
     def _batch_output_for(self, job: BatchJob, task: Optional[ProcessingTask]) -> str:
         base, ext = os.path.splitext(os.path.basename(job.input_path))
@@ -7671,6 +8390,11 @@ class MainWindow:
         params.blur_ksize = self.var_blur_ksize.get()
         params.sharpen_strength = self.var_sharpen.get()
         params.denoise_strength = self.var_denoise.get()
+        params.denoise_method = self.var_dn_method.get()
+        params.denoise_sigma = int(self.var_dn_sigma.get())
+        params.denoise_mix = float(self.var_dn_mix.get())
+        params.denoise_content = self.var_dn_content.get()
+        params.denoise_chroma_boost = bool(self.var_dn_chroma.get())
         params.edge_type = self.var_edge_type.get()
         params.canny_low = self.var_canny_low.get()
         params.canny_high = self.var_canny_high.get()
@@ -7688,6 +8412,7 @@ class MainWindow:
         params.concat_files = list(self.concat_file_list)
 
         # ★ 输出编码
+        params.output_format = self.var_output_format.get()
         params.video_codec = self.var_video_codec.get()
         params.rate_mode = self.var_rate_mode.get()
         params.crf = self.var_crf.get()
@@ -7778,6 +8503,7 @@ class MainWindow:
                 ProcessingTask.RESIZE, ProcessingTask.ROTATE,
                 ProcessingTask.BRIGHTNESS_CONTRAST, ProcessingTask.COLOR_SPACE,
                 ProcessingTask.HISTOGRAM_EQ, ProcessingTask.SHARPEN_BLUR,
+                ProcessingTask.DENOISE,
                 ProcessingTask.SKETCH, ProcessingTask.CARTOON, ProcessingTask.EMBOSS,
                 ProcessingTask.EDGE_DETECT, ProcessingTask.COLOR_TONE,
                 ProcessingTask.MOSAIC, ProcessingTask.VIGNETTE,
@@ -7901,11 +8627,18 @@ class MainWindow:
         elif self._current_task == ProcessingTask.TO_GIF:
             ft = [("GIF", "*.gif"), ("所有文件", "*.*")]
             de = ".gif"
+        elif self._current_task == ProcessingTask.SUBTITLE_OCR:
+            ft = [("字幕", "*.srt"), ("所有文件", "*.*")]
+            de = ".srt"
         else:
-            ft = [("MP4", "*.mp4"), ("AVI", "*.avi"), ("MOV", "*.mov"), ("所有文件", "*.*")]
-            de = ".mp4"
+            de = self._video_container_ext()
+            label = VIDEO_CONTAINER_CHOICES.get(self.var_output_format.get(), "视频")
+            ft = [(label, f"*{de}"), ("所有文件", "*.*")]
         path = filedialog.asksaveasfilename(title="选择输出路径", defaultextension=de, filetypes=ft)
         if path:
+            if self._task_uses_video_container():
+                root, _ = os.path.splitext(path)
+                path = root + de
             self.var_output_path.set(path)
 
     def _add_concat_file(self):
@@ -7941,6 +8674,43 @@ class MainWindow:
             self.concat_listbox.selection_set(new_idx)
             f = self.concat_file_list.pop(idx)
             self.concat_file_list.insert(new_idx, f)
+
+    def _open_torch_pth_window(self):
+        """懒加载 VRT 子窗口。这里只 import 窗口模块，绝不 import torch。"""
+        try:
+            from vrt_window import open_vrt_window
+        except Exception as e:
+            messagebox.showerror("无法打开", f"加载 vrt_window.py 失败:\n{e}")
+            return
+        src = self.current_video_info.path if self.current_video_info else ""
+        dst = self.var_output_path.get().strip()
+        open_vrt_window(
+            self.root, input_path=src, output_hint=dst,
+            encode_getter=self.snapshot_encode_settings,
+        )
+
+    def snapshot_encode_settings(self) -> dict:
+        """VRT 子进程跟主窗口走：格式、编码器、质量、是否留声。"""
+        try:
+            bitrate = int(str(self.var_bitrate.get()).strip() or "4000")
+        except ValueError:
+            bitrate = 4000
+        try:
+            crf = int(self.var_crf.get())
+        except (tk.TclError, ValueError, TypeError):
+            crf = 20
+        fmt = (self.var_output_format.get() or "mp4").strip().lower()
+        if fmt not in VIDEO_CONTAINER_CHOICES:
+            fmt = "mp4"
+        return {
+            "format": fmt,
+            "codec": (self.var_video_codec.get() or "auto").strip().lower(),
+            "rate_mode": (self.var_rate_mode.get() or "crf").strip().lower(),
+            "crf": crf,
+            "bitrate": max(100, bitrate),
+            "preset": self.var_encode_preset.get() or "medium",
+            "keep_audio": bool(self.var_keep_audio.get()),
+        }
 
     # ════════════════════════════════════════════════════════════
     #  ★ 智能模型下载管理器 (只下载缺失和损坏的)
